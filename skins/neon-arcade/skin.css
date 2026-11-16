@@ -1,0 +1,39 @@
+/* Neon Arcade: variables only. */
+:root {
+  --bg: #070716;
+  --panel: #0d0d24;
+  --panel-2: #14143a;
+  --row: #111130;
+  --row-hover: #20205a;
+  --line: #2c2c6e;
+  --text: #f1eaff;
+  --dim: #9a94c8;
+
+  --led: #2ff3e0;
+  --amber: #ffd447;
+  --red: #ff3d81;
+  --blue: #6aa8ff;
+  --led-off: #15153a;
+
+  --violet: #ff2e93;
+  --accent-hi: #ff9ccc;
+  --accent-fill: linear-gradient(180deg, #ff5fae, #ff2e93 55%, #b3125f);
+  --accent-glow: rgba(255, 46, 147, 0.55);
+  --accent-soft: #ffe1f0;
+
+  --app-bg: linear-gradient(180deg, #2a1a5e, #0d0d24 30%, #070716);
+  --app-edge: #5b4fd0;
+  --titlebar: linear-gradient(90deg, #ff2e93, #7a2bd8 55%, #1f6fe0);
+  --display: #05050f;
+  --button: linear-gradient(180deg, #2b2b78, #17174a);
+  --button-text: #f1eaff;
+  --chrome-button: linear-gradient(180deg, #c9c3ff, #7a70d8);
+  --tab: linear-gradient(180deg, #1d1d52, #111130);
+  --tab-active: linear-gradient(180deg, #2ff3e0, #15a89a);
+  --tab-active-text: #03201d;
+  --brand-a: linear-gradient(180deg, #ffffff, #9fd8ff);
+  --brand-b: linear-gradient(180deg, #ff9ccc, #ff2e93);
+}
+
+.deck-btn { border-color: #3b3b9a; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15); }
+.ico.pause, .ico.retry, .ico.shuffle { border-color: #f1eaff; }

@@ -1,0 +1,112 @@
+/*
+ * Blue 2001: a light skin in the style of early-2000s desktops. Colours and
+ * shapes only, all drawn here; no picture or icon from any operating system.
+ */
+:root {
+  --bg: #ece9d8;
+  --panel: #f7f5ea;
+  --panel-2: #ffffff;
+  --row: #ffffff;
+  --row-hover: #dbe7fb;
+  --line: #a9b8d6;
+  --text: #1a1a1a;
+  --dim: #5b6478;
+  --font: Tahoma, 'Segoe UI', Verdana, sans-serif;
+
+  --led: #1c7a1c;
+  --amber: #b86a00;
+  --red: #c62b1f;
+  --blue: #1d53c2;
+  --led-off: #d8dde8;
+  --display: #f3f6fc;
+
+  --violet: #2a62d9;
+  --accent: #2a62d9;
+  --accent-hi: #8fb4ff;
+  --accent-fill: linear-gradient(180deg, #5d93f2, #2a62d9 50%, #1c4bb5);
+  --accent-glow: rgba(42, 98, 217, 0.45);
+  --accent-soft: #ffffff;
+
+  --app-bg: linear-gradient(180deg, #f3f1e4, #ece9d8);
+  --app-edge: #0b3fc4;
+  --titlebar: linear-gradient(180deg, #2f7df5 0%, #0f5be8 12%, #0a4fd8 50%, #0b47c2 88%, #0a3aa6 100%);
+  --titlebar-text: #ffffff;
+
+  --button: linear-gradient(180deg, #ffffff, #f1efe3 55%, #dcd8c5);
+  --button-text: #1a1a1a;
+  --chrome-button: linear-gradient(180deg, #5f9cff, #2a66e0 55%, #1d4fc0);
+  --tab: linear-gradient(180deg, #fbfaf3, #e4e1d0);
+  --tab-active: linear-gradient(180deg, #ffffff, #ffffff);
+  --tab-active-text: #1a1a1a;
+  --brand-a: linear-gradient(180deg, #ffffff, #d6e4ff);
+  --brand-b: linear-gradient(180deg, #ffd28a, #f08a1c);
+}
+
+/* The frame: a thick blue edge with rounded top corners. */
+#app { border-radius: 9px 9px 4px 4px; }
+.titlebar { border-radius: 7px 7px 0 0; text-shadow: 1px 1px 1px rgba(0, 0, 40, 0.6); font-weight: 700; }
+.chrome-btn { color: #ffffff; border: 1px solid #ffffff; border-radius: 4px; text-shadow: 0 1px 1px rgba(0, 0, 60, 0.5); }
+.chrome-btn.close { background: linear-gradient(180deg, #f08a6c, #d8432a 55%, #b82d18); }
+.titlebar select, .titlebar .chrome-btn.wide { color: #1a1a1a; text-shadow: none; background: linear-gradient(180deg, #ffffff, #e9e6d6); border-color: #7f9db9; }
+
+/* The banner and the button row sit on a blue band, like a task pane's head. */
+.brand { background: linear-gradient(180deg, #6f96e8, #3d68cf); border: 1px solid #2b4fae; border-radius: 6px; }
+.brand-tag { color: #eaf1ff; border-left-color: rgba(255, 255, 255, 0.4); }
+.transport { background: linear-gradient(180deg, #f8f7ee, #e6e3d2); border-bottom: 1px solid #c9c5b0; }
+.statusbar { background: #ffffff; border: 1px solid #7f9db9; color: #1a1a1a; }
+
+/* Buttons: cream, rounded, with a blue edge; the hover is a warm outline. */
+.deck-btn { border: 1px solid #1c4bb5; border-radius: 4px; box-shadow: inset 0 1px 0 #ffffff, inset 0 -2px 0 rgba(0, 0, 0, 0.06); }
+.deck-btn:hover { box-shadow: inset 0 0 0 2px #f6b93b; }
+.send { border-color: #1c4bb5; border-radius: 4px; }
+
+/* The left column: the blue side column with white boxes in it. */
+#left { background: linear-gradient(180deg, #7ba2e7, #6375d6); border: 1px solid #3d5fbf; }
+#left .tab { color: #ffffff; background: linear-gradient(180deg, #5d86df, #3f63c4); border-color: #2b4fae; }
+#left .tab.active { color: #15428b; background: #ffffff; }
+#left .list, #left #chatList { background: #f0f5ff; border: 1px solid #ffffff; border-radius: 4px; padding: 4px; }
+#left input[type='search'] { background: #ffffff; color: #1a1a1a; border: 1px solid #7f9db9; }
+.group-head b { color: #15428b; }
+.chat-row span, .proj-name { color: #15428b; }
+.chat-row:hover span { text-decoration: underline; }
+.chat-row.open, .proj.active { background: linear-gradient(180deg, #4a82ea, #2a62d9); }
+.chat-row.open span, .chat-row.open i, .proj.active .proj-name { color: #ffffff; }
+.chat-row i { color: #5b6478; }
+.chat-row .guide { background: #b7c7ea; }
+.chat-row.running span { color: #1c7a1c; }
+
+/* The chat: cream paper, with speech boxes. */
+#center { background: #fbfaf4; border: 1px solid #7f9db9; }
+.avatar.claude { background-color: #ffffff; border: 1px solid #c9c5b0; }
+#composer { background: #ece9d8; border-top: 1px solid #c9c5b0; }
+#input { background: #ffffff; color: #1a1a1a; border: 1px solid #7f9db9; border-radius: 4px; }
+.chip-btn { background: #ffffff; color: #1a1a1a; border-color: #7f9db9; }
+.slash-menu { box-shadow: 2px 2px 6px rgba(0, 0, 0, 0.3); }
+
+/* The right column: white panels with a blue head. */
+.panel { border: 1px solid #7f9db9; border-radius: 4px; }
+.panel h3 { color: #ffffff; background: linear-gradient(90deg, #2a62d9, #7ba2e7); border-radius: 3px 3px 0 0; }
+#right { background: #ece9d8; }
+
+/* Scroll bars in the same blue. */
+::-webkit-scrollbar { width: 14px; height: 14px; }
+::-webkit-scrollbar-track { background: #f1efe2; }
+::-webkit-scrollbar-thumb { background: linear-gradient(90deg, #c3d5fd, #9cb8f5); border: 1px solid #ffffff; border-radius: 3px; }
+
+/* Boxes inside the chat that are dark in other skins: white paper here. */
+.tool, .msg-body pre, .tasks, .work-list { background: #ffffff; border-color: #7f9db9; }
+.tool pre, .ask pre { color: #1a1a1a; background: #f6f8fc; }
+.tool pre.del { color: #a11b12; background: #fdecea; }
+.tool pre.add { color: #17661f; background: #eaf7ec; }
+.msg-body code { background: #e8eefb; color: #15428b; }
+.msg-body a { color: #0b47c2; }
+.ask pre.del { color: #a11b12; }
+.ask pre.add { color: #17661f; }
+.chip-btn.stop { color: #c62b1f; border-color: #c62b1f; }
+.led-btn:hover, .led-btn[aria-expanded='true'] { background: #dbe7fb; }
+#right { border: 1px solid #7f9db9; }
+
+/* The picture toolbar and the Widgets panel are part of this look. */
+:root { --toolbar: on; }
+body.has-toolbar .transport .deck-btn:hover { background: #ffffff; border-color: #7f9db9; box-shadow: inset 0 0 0 1px #f6b93b; }
+.wg-cal .today { color: #ffffff; }

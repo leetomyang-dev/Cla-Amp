@@ -1,0 +1,44 @@
+/* Amber Terminal: mostly variables, plus two small rules for the flat look. */
+:root {
+  --bg: #080604;
+  --panel: #0e0a05;
+  --panel-2: #151007;
+  --row: #130e06;
+  --row-hover: #261b0a;
+  --line: #3a2a10;
+  --text: #ffd9a0;
+  --dim: #b08a4e;
+
+  /* The three meter colours: fine, getting full, nearly full. */
+  --led: #ffb000;
+  --amber: #ff8a00;
+  --red: #ff4d2e;
+  --blue: #ffc861;
+  --led-off: #1d1407;
+  /* An old monitor's faint lines over the window. */
+  --screen-lines: on;
+
+  --violet: #c47a00;
+  --accent-hi: #ffd27a;
+  --accent-fill: linear-gradient(180deg, #e39a12, #b06c00);
+  --accent-glow: rgba(255, 176, 0, 0.45);
+  --accent-soft: #fff0cf;
+
+  --font: 'Cascadia Mono', Consolas, monospace;
+  --app-bg: #0b0805;
+  --app-edge: #5a4014;
+  --titlebar: linear-gradient(180deg, #3b2805, #1c1303);
+  --titlebar-text: #ffcf7a;
+  --display: #050402;
+  --button: linear-gradient(180deg, #2c1f08, #1a1205);
+  --button-text: #ffcf7a;
+  --chrome-button: linear-gradient(180deg, #d9a441, #8a5f12);
+  --tab: #1a1205;
+  --tab-active: linear-gradient(180deg, #ffb000, #c47a00);
+  --tab-active-text: #1a1002;
+  --brand-a: linear-gradient(180deg, #ffe2a6, #ffb000);
+  --brand-b: linear-gradient(180deg, #ffb000, #c45a00);
+}
+
+.deck-btn { border-color: #5a4014; box-shadow: none; }
+.ico.pause, .ico.retry, .ico.shuffle { border-color: #ffcf7a; }

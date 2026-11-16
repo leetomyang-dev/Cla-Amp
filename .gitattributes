@@ -1,0 +1,2 @@
+# The start file must keep its Windows line endings, also inside a downloaded ZIP.
+*.bat -text

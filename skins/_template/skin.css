@@ -1,0 +1,61 @@
+/*
+ * A skin template. Copy this folder, rename it (letters, numbers, dashes),
+ * edit skin.json, then change the values below. Every variable is optional:
+ * delete the ones you leave alone. The values here are the Classic skin's.
+ * The full guide is docs/skins.md.
+ */
+:root {
+  /* Surfaces, darkest to lightest. */
+  --bg: #0b0c10;          /* behind everything */
+  --panel: #10131b;       /* the three columns */
+  --panel-2: #161a25;     /* panels inside the right column, cards */
+  --row: #151822;         /* a row in a list */
+  --row-hover: #222838;   /* that row under the mouse */
+  --line: #2a3040;        /* thin borders */
+
+  /* Text. */
+  --text: #e6ebf5;
+  --dim: #98a1b4;         /* secondary text */
+  --font: 'Segoe UI', system-ui, sans-serif;
+  --mono: 'Cascadia Mono', Consolas, 'Courier New', monospace;
+
+  /* Lights: status text, meters, the equalizer and the spectrum. */
+  --led: #39d353;         /* fine */
+  --amber: #f5a623;       /* getting full, waiting */
+  --red: #ef4444;         /* nearly full, needs you */
+  --blue: #4c9aff;        /* complete */
+  --led-off: #171c27;     /* an unlit equalizer segment */
+  --display: #07090d;     /* the glass behind LED text */
+
+  /* The accent: the selected project, the send button, active choices. */
+  --violet: #6d3fe0;
+  --accent-hi: #b79cff;   /* its light edge */
+  --accent-fill: linear-gradient(180deg, #8256f0, var(--violet) 55%, #4f2bb5);
+  --accent-glow: rgba(109, 63, 224, 0.55);
+  --accent-soft: #e4d9ff; /* text on top of the accent */
+
+  /* The window frame. */
+  --app-bg: linear-gradient(180deg, #3b4150, #1b1e27 28%, #14161d);
+  --app-edge: #5b6274;
+  --titlebar: linear-gradient(180deg, #2f49c9, #1b2a86 55%, #121c5c);
+  --titlebar-text: #ffffff;
+
+  /* Buttons and tabs. */
+  --button: linear-gradient(180deg, #eef1f7, #b3bac9 48%, #8a92a5 52%, #a9b0c0);
+  --button-text: #11141c;
+  --chrome-button: linear-gradient(180deg, #d5dae6, #8d95a8 55%, #6b7285);
+  --tab: linear-gradient(180deg, #3a4050, #20242e);
+  --tab-active: linear-gradient(180deg, #e6e9f0, #a7aebe);
+  --tab-active-text: #11141c;
+
+  /* The two halves of the name. For your own logo, put a picture in this
+     folder and add the line:  --logo: url('my-logo.png');  */
+  --brand-a: linear-gradient(180deg, #ffffff, #c9cfdb 45%, #7d8596);
+  --brand-b: linear-gradient(180deg, #ffc27a, #f97316 60%, #b84a05);
+}
+
+/* Anything the variables do not reach can be restyled with ordinary CSS, for
+   example a wallpaper behind the chat:
+
+#chat { background: url('wallpaper.jpg') center / cover; }
+*/

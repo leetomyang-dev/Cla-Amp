@@ -1,0 +1,7 @@
+node_modules/
+shot*.png
+*.log
+out-*.txt
+ClaudeAmp-review.md
+ClaudeAmp-independent-legal-review.md
+anthropic-question.md

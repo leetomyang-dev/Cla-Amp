@@ -1,0 +1,3726 @@
+// Cla-Amp's main process: the window, the saved state, one Claude Code
+// session per project (through the Agent SDK), and the audio deck helper.
+import { execFile, spawn } from 'node:child_process'
+import { createHash, randomUUID } from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
+import readline from 'node:readline'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+import { archiveSession, deleteSession, forkSession, getSessionInfo, getSessionMessages, listSessions, query } from '@anthropic-ai/claude-agent-sdk'
+import { BrowserWindow, Menu, Tray, app, clipboard, dialog, ipcMain, screen, session as webSession, shell } from 'electron'
+
+import { describeSong, readCover, readPlaylist, scanFolders } from './music-library.mjs'
+import { chatsFolder, countOutside, listOutside } from './outside-work.mjs'
+import { convertWinampSkin } from './winamp-skin.mjs'
+
+const ROOT = path.dirname(fileURLToPath(import.meta.url))
+
+// The program had another name before. Its settings folder is carried over
+// once, whole, under the new name, so nothing has to be set up again.
+try {
+  const now = app.getPath('userData')
+  const before = path.join(path.dirname(now), ['Claude', 'Amp'].join(''))
+
+  // Only for the real thing: never in the demo, and only when the earlier
+  // folder holds settings and the new one holds none yet.
+  const isWanted =
+    !process.argv.includes('--demo') &&
+    path.basename(now) === 'Cla-Amp' &&
+    fs.existsSync(path.join(before, ['claude', 'amp.json'].join(''))) &&
+    !fs.existsSync(path.join(now, 'claamp.json'))
+
+  if (isWanted) {
+    // A new folder without settings holds only what the window engine put there.
+    fs.rmSync(now, { recursive: true, force: true })
+
+    if (!fs.existsSync(now)) {
+      fs.renameSync(before, now)
+
+      for (const end of ['.json', '.json.bak']) {
+        const old = path.join(now, ['claude', 'amp'].join('') + end)
+
+        if (fs.existsSync(old) && !fs.existsSync(path.join(now, 'claamp' + end))) {
+          fs.renameSync(old, path.join(now, 'claamp' + end))
+        }
+      }
+    }
+  }
+} catch {
+  dialog.showErrorBox('Cla-Amp', 'The earlier version of this program is still running. Close it and its player windows, then start Cla-Amp again.')
+  app.exit(1)
+}
+
+// The window's own player (the equalizer's) is not offered to Windows as a
+// media session: the deck would otherwise take it for another app's music.
+app.commandLine.appendSwitch('disable-features', 'HardwareMediaKeyHandling,MediaSessionService')
+const IS_DEMO = process.argv.includes('--demo')
+// The screenshot and scripted-test flags run only for a developer who set
+// CLAAMP_DEV=1 and started the app from its source folder: a shortcut or a
+// link that passes flags to an installed app gets nothing from them.
+const IS_DEV = process.env.CLAAMP_DEV === '1' && !app.isPackaged
+const SHOT = IS_DEV ? process.argv.find(arg => arg.startsWith('--shot='))?.slice(7) : undefined
+// For the hidden screenshot test: how long to wait, and how tall a window.
+const numberArg = (name, fallback) => Number(process.argv.find(arg => arg.startsWith(`--${name}=`))?.split('=')[1]) || fallback
+const AUDIO = /\.(mp3|wav|m4a|wma|flac|aac)$/i
+const MODES = ['default', 'acceptEdits', 'plan']
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+// A process started only to answer the panels is ended after this long idle.
+const SLEEP_AFTER = 10 * 60 * 1000
+
+// The copy of Claude Code that ships with the Agent SDK: the sessions run on
+// it, and its own `auth` commands do the sign-in.
+const CLAUDE_BIN = path.join(ROOT, 'node_modules', '@anthropic-ai', 'claude-agent-sdk-win32-x64', 'claude.exe')
+
+// Started from inside another Claude session, this app would inherit that
+// session's private settings; Claude Code must not see them.
+const childEnv = () => {
+  const env = { ...process.env }
+
+  if (env.CLAUDE_CODE_ENTRYPOINT || env.CLAUDECODE) {
+    for (const name of Object.keys(env)) {
+      if (/^(CLAUDE|ANTHROPIC_BASE_URL|AI_AGENT|BAGGAGE)/i.test(name)) {
+        delete env[name]
+      }
+    }
+  }
+
+  return env
+}
+
+const authStatus = () =>
+  new Promise(resolve => {
+    execFile(CLAUDE_BIN, ['auth', 'status'], { env: childEnv(), windowsHide: true, timeout: 20000 }, (_error, out) => {
+      try {
+        resolve({ isSignedIn: JSON.parse(out).loggedIn === true })
+      } catch {
+        resolve({ isSignedIn: false })
+      }
+    })
+  })
+
+// Models that cannot show their thinking as they go; learnt from the model list.
+const plainModels = new Set()
+
+let desktopRead = { at: 0, chats: new Map() }
+
+/**
+ * What the Claude desktop app saved for each of its chats: the model and the
+ * effort the chat ran on, by conversation id. Read only; the files are the
+ * desktop app's own and their layout is not documented, so anything
+ * unexpected is skipped.
+ */
+const desktopChats = () => {
+  if (Date.now() - desktopRead.at < 20000) {
+    return desktopRead.chats
+  }
+
+  const chats = new Map()
+  const roots = []
+
+  try {
+    const base = path.join(process.env.LOCALAPPDATA ?? '', 'Claude-Data')
+
+    for (const name of fs.readdirSync(base)) {
+      roots.push(path.join(base, name, 'claude-code-sessions'))
+    }
+  } catch {
+    // No desktop app data in that place.
+  }
+  roots.push(path.join(process.env.APPDATA ?? '', 'Claude', 'claude-code-sessions'))
+
+  const walk = (folder, depth) => {
+    let entries = []
+
+    try {
+      entries = fs.readdirSync(folder, { withFileTypes: true })
+    } catch {
+      return
+    }
+
+    for (const entry of entries) {
+      const full = path.join(folder, entry.name)
+
+      if (entry.isDirectory() && depth < 4) {
+        walk(full, depth + 1)
+      } else if (entry.isFile() && /^local_.*\.json$/.test(entry.name)) {
+        try {
+          const saved = JSON.parse(fs.readFileSync(full, 'utf8'))
+          const at = Number(saved.lastActivityAt) || 0
+
+          if (typeof saved.cliSessionId === 'string' && at >= (chats.get(saved.cliSessionId)?.at ?? 0)) {
+            chats.set(saved.cliSessionId, {
+              at,
+              model: typeof saved.model === 'string' ? saved.model : null,
+              effort: EFFORTS.includes(saved.effort) ? saved.effort : null,
+            })
+          }
+        } catch {
+          // A record being written, or one this app cannot read.
+        }
+      }
+    }
+  }
+
+  for (const one of roots) {
+    walk(one, 0)
+  }
+  desktopRead = { at: Date.now(), chats }
+
+  return chats
+}
+
+/** Puts a project on the model and effort its chat has in the desktop app. */
+const followDesktop = (project, sessionId) => {
+  const original = Object.entries(state.copies ?? {}).find(([, copy]) => copy === sessionId)?.[0] ?? sessionId
+  const saved = desktopChats().get(original)
+
+  if (!saved) {
+    return false
+  }
+
+  project.model = saved.model
+  project.effort = saved.effort
+
+  return true
+}
+
+/** Runs the bundled Claude Code with arguments and gives back what it printed. */
+const claudeCli = args =>
+  new Promise(resolve => {
+    execFile(
+      CLAUDE_BIN,
+      args,
+      { env: childEnv(), windowsHide: true, timeout: 60000, maxBuffer: 16 * 1024 * 1024 },
+      (error, out, err) => resolve({ isOk: !error, out: String(out ?? ''), err: String(err ?? '') }),
+    )
+  })
+
+/** The plan's limits as rows for the Usage panel: each a share used and when it starts over. */
+const shapeUsage = usage => {
+  const limits = usage?.rate_limits
+
+  if (!usage?.rate_limits_available || !limits) {
+    return { isAvailable: false, plan: usage?.subscription_type ?? null, rows: [] }
+  }
+
+  const rows = []
+  const add = (label, percent, resetsAt, isAlways = false) => {
+    const isKnown = typeof percent === 'number'
+
+    if ((isKnown || isAlways) && !rows.some(row => row.label === label)) {
+      rows.push({ label, percent: isKnown ? percent : null, resetsAt: resetsAt ?? null })
+    }
+  }
+  add('5-hour session', limits.five_hour?.utilization, limits.five_hour?.resets_at, true)
+  add('Week, all models', limits.seven_day?.utilization, limits.seven_day?.resets_at, true)
+
+  // One weekly row per model the plan counts on its own (Fable, for one).
+  for (const one of Array.isArray(limits.limits) ? limits.limits : []) {
+    const name = one?.scope?.model?.display_name
+
+    if (one?.kind === 'weekly_scoped' && name) {
+      add(`Week, ${name}`, one.percent, one.resets_at)
+    }
+  }
+
+  for (const one of Array.isArray(limits.model_scoped) ? limits.model_scoped : []) {
+    add(`Week, ${one.display_name}`, one.utilization, one.resets_at)
+  }
+  add('Week, Opus', limits.seven_day_opus?.utilization, limits.seven_day_opus?.resets_at)
+  add('Week, Sonnet', limits.seven_day_sonnet?.utilization, limits.seven_day_sonnet?.resets_at)
+
+  if (limits.extra_usage?.is_enabled) {
+    add('Extra usage', limits.extra_usage.utilization, null, true)
+  }
+
+  return { isAvailable: true, plan: usage.subscription_type ?? null, rows }
+}
+
+const shapeServers = servers =>
+  (servers ?? []).map(one => ({
+    name: one.name,
+    status: one.status,
+    scope: one.scope ?? '',
+    isClaudeAi: one.config?.type === 'claudeai-proxy' || one.scope === 'claudeai',
+    tools: one.tools?.length ?? 0,
+    error: one.error ?? '',
+  }))
+
+let win = null
+
+// ---------------------------------------------------------------- saved state
+
+const dataDir = () => app.getPath('userData')
+const stateFile = () => path.join(dataDir(), 'claamp.json')
+const transcriptFile = id => path.join(dataDir(), 'transcripts', `${id}.jsonl`)
+
+let state = { projects: [], prefs: {} }
+
+const loadState = () => {
+  try {
+    state = { projects: [], prefs: {}, ...JSON.parse(fs.readFileSync(stateFile(), 'utf8')) }
+  } catch {
+    state = { projects: [], prefs: {} }
+  }
+}
+
+// Where a Winamp skin may be fetched from by its link: the Winamp Skin
+// Museum's pages name the skin, its file store holds it.
+const SKIN_STORE = 'r2.webampskins.org'
+const SKIN_SITES = ['skins.webamp.org', SKIN_STORE]
+
+/** Turns a Winamp skin file's bytes into a skin in the person's skins folder. */
+const keepWinampSkin = (bytes, name) => {
+  const made = convertWinampSkin(bytes, name)
+  const slug =
+    made.name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 32) || 'skin'
+  const folder = path.join(userSkins(), `winamp-${slug}`)
+  fs.mkdirSync(folder, { recursive: true })
+  fs.writeFileSync(path.join(folder, 'skin.css'), made.css)
+  fs.writeFileSync(path.join(folder, 'skin.json'), made.json)
+
+  for (const [file, data] of Object.entries(made.files ?? {})) {
+    fs.writeFileSync(path.join(folder, file), data)
+  }
+
+  return { id: `mine/winamp-${slug}`, name: made.name }
+}
+
+// Whether this run's window was made see-through (clear glass).
+let isClearWindow = false
+
+const saveState = () => {
+  fs.mkdirSync(dataDir(), { recursive: true })
+  fs.writeFileSync(stateFile(), JSON.stringify(state, null, 2))
+}
+
+const appendTranscript = (id, event) => {
+  const file = transcriptFile(id)
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.appendFile(file, `${JSON.stringify(event)}\n`, () => {})
+}
+
+const readTranscript = id => {
+  try {
+    return fs
+      .readFileSync(transcriptFile(id), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .slice(-3000)
+      .map(line => JSON.parse(line))
+  } catch {
+    return []
+  }
+}
+
+const send = (channel, payload) => {
+  if (win !== null && !win.isDestroyed()) {
+    win.webContents.send(channel, payload)
+  }
+}
+
+// ------------------------------------------------------------------- sessions
+
+const flatten = content => {
+  if (typeof content === 'string') {
+    return content
+  }
+
+  if (!Array.isArray(content)) {
+    return ''
+  }
+
+  return content
+    .map(block => (block.type === 'text' ? block.text : block.type === 'image' ? '[image]' : ''))
+    .join('\n')
+}
+
+/**
+ * The pictures in a tool's answer (a screenshot, an image file Claude read),
+ * saved once each in this app's own pictures folder and given as addresses
+ * the chat can show. Only the four common picture kinds, at most six a time.
+ */
+const PICTURE_KINDS = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }
+
+const picturesOf = content => {
+  const found = []
+
+  for (const block of Array.isArray(content) ? content : []) {
+    const source = block?.type === 'image' ? block.source : null
+    const kind = PICTURE_KINDS[source?.media_type]
+
+    if (source?.type !== 'base64' || !kind || typeof source.data !== 'string' || source.data.length > 16000000 || found.length >= 6) {
+      continue
+    }
+
+    try {
+      const folder = path.join(dataDir(), 'pictures')
+      const file = path.join(folder, `${createHash('sha1').update(source.data).digest('hex')}.${kind}`)
+
+      if (!fs.existsSync(file)) {
+        fs.mkdirSync(folder, { recursive: true })
+        fs.writeFileSync(file, Buffer.from(source.data, 'base64'))
+      }
+      found.push(pathToFileURL(file).href)
+    } catch {
+      // A picture that cannot be saved is just not shown.
+    }
+  }
+
+  return found
+}
+
+// What the person typed, as opposed to what the engine added around it.
+const isSaid = text => text.trim() !== '' && !text.trim().startsWith('<')
+
+/**
+ * A saved Claude Code conversation (the desktop app's or the terminal's) as
+ * the events this app's chat is drawn from.
+ */
+const toEvents = (projectId, messages, ts) => {
+  const events = []
+  let at = ts
+  const push = event => events.push({ projectId, ts: at, ...event })
+
+  for (const one of messages) {
+    at = Date.parse(one.timestamp ?? '') || ts
+    const content = one.message?.content
+    const isMain = one.parent_tool_use_id === null
+
+    if (one.type === 'user') {
+      if (typeof content === 'string') {
+        if (isMain && isSaid(content)) {
+          push({ t: 'user', text: content })
+        }
+      } else if (Array.isArray(content)) {
+        const said = content
+          .filter(block => block.type === 'text' && isSaid(block.text))
+          .map(block => block.text)
+          .join('\n')
+
+        if (isMain && said !== '') {
+          push({ t: 'user', text: said })
+        }
+
+        for (const block of content) {
+          if (block.type === 'tool_result') {
+            push({
+              t: 'tool_result',
+              id: block.tool_use_id,
+              text: flatten(block.content).slice(0, 20000),
+              pictures: picturesOf(block.content),
+              isError: block.is_error === true,
+              isMain,
+            })
+          }
+        }
+      }
+    } else if (one.type === 'assistant' && Array.isArray(content)) {
+      const blocks = []
+
+      for (const block of content) {
+        if (block.type === 'text' && block.text.trim() !== '') {
+          blocks.push({ type: 'text', text: block.text })
+        } else if (block.type === 'thinking' && String(block.thinking ?? '').trim() !== '') {
+          blocks.push({ type: 'thinking', text: block.thinking })
+        } else if (block.type === 'tool_use') {
+          blocks.push({ type: 'tool_use', id: block.id, name: block.name, input: block.input })
+        }
+      }
+
+      const used = one.message.usage
+      const usage =
+        isMain && used
+          ? {
+              input: used.input_tokens ?? 0,
+              cacheRead: used.cache_read_input_tokens ?? 0,
+              cacheWrite: used.cache_creation_input_tokens ?? 0,
+              output: used.output_tokens ?? 0,
+            }
+          : undefined
+
+      if (blocks.length > 0 || usage) {
+        push({ t: 'assistant', blocks, usage, isMain, uuid: one.uuid })
+      }
+    }
+  }
+
+  return events
+}
+
+/** One project's Claude Code session: its process, its queue of prompts, its permission asks. */
+class Session {
+  constructor(project) {
+    this.project = project
+    this.query = null
+    this.life = 0
+    this.pending = []
+    this.waiters = []
+    this.queue = []
+    this.isBusy = false
+    this.isStopping = false
+    this.status = 'waiting'
+    this.detail = project.sessionId ? 'Ready to pick up where it left off' : 'Waiting for a prompt'
+    this.asks = new Map()
+    this.agents = new Set()
+    // Agents the engine runs in the background: task id to { id, name, kind, isBackground }.
+    // They outlive the tool call that started them and the turn itself.
+    this.tasks = new Map()
+    // When this app last wrote to the conversation, so the watcher can tell
+    // its own writes from another app's.
+    this.touched = Date.now()
+    this.seen = undefined
+    this.watched = null
+  }
+
+  emit(event, shouldKeep = true) {
+    const full = { projectId: this.project.id, ts: Date.now(), ...event }
+    this.touched = Date.now()
+
+    if (shouldKeep) {
+      appendTranscript(this.project.id, full)
+    }
+    send('amp:event', full)
+  }
+
+  setStatus(status, detail) {
+    this.status = status
+    this.detail = detail ?? this.detail
+    this.emit(
+      { t: 'status', status, detail: this.detail, agents: this.agentCount, queue: this.queue },
+      false,
+    )
+  }
+
+  /** A prompt from the person: runs now, or waits its turn in the queue. */
+  submit(text) {
+    if (this.isBusy) {
+      this.queue.push(text)
+      this.setStatus(this.status)
+
+      return
+    }
+
+    this.begin(text)
+  }
+
+  begin(text) {
+    this.isBusy = true
+    this.isStopping = false
+    this.emit({ t: 'user', text })
+    this.setStatus('working', 'Thinking')
+    const waiter = this.waiters.shift()
+
+    if (waiter) {
+      waiter(text)
+    } else {
+      this.pending.push(text)
+    }
+
+    if (this.query === null) {
+      this.start()
+    }
+  }
+
+  nextPrompt() {
+    if (this.pending.length > 0) {
+      return Promise.resolve(this.pending.shift())
+    }
+
+    return new Promise(resolve => this.waiters.push(resolve))
+  }
+
+  async *prompts(life) {
+    for (;;) {
+      const text = await this.nextPrompt()
+
+      if (text === null || life !== this.life) {
+        return
+      }
+
+      yield {
+        type: 'user',
+        message: { role: 'user', content: text },
+        parent_tool_use_id: null,
+        session_id: this.project.sessionId ?? '',
+      }
+    }
+  }
+
+  start() {
+    this.life += 1
+    const life = this.life
+    const project = this.project
+    const running = query({
+      prompt: this.prompts(life),
+      options: {
+        cwd: project.cwd,
+        // Claude Code keeps a task list in sessions that ask for it; the chat shows it.
+        env: { ...childEnv(), CLAUDE_CODE_ENABLE_TODO_TOOLS: '1' },
+        resume: project.sessionId || undefined,
+        permissionMode: project.mode ?? 'default',
+        model: project.model || undefined,
+        effort: project.effort || undefined,
+        // Claude's thinking is sent as it goes, in a short form, where the model can.
+        thinking: plainModels.has(project.model) ? undefined : { type: 'adaptive', display: 'summarized' },
+        includePartialMessages: true,
+        // After each turn Claude Code may guess the next message; the message box offers it.
+        promptSuggestions: true,
+        // A folder's own settings can start programs and pre-approve tools, so they
+        // load only for a folder the person has said they trust.
+        settingSources: project.isTrusted === true ? ['user', 'project', 'local'] : ['user'],
+        systemPrompt: { type: 'preset', preset: 'claude_code' },
+        canUseTool: (tool, input, options) => this.ask(tool, input, options),
+        stderr: text => {
+          if (process.env.CLAAMP_DEBUG) {
+            process.stderr.write(text)
+          }
+        },
+      },
+    })
+    this.query = running
+    this.woke = Date.now()
+
+    if (typeof project.isFast === 'boolean') {
+      void running.applyFlagSettings({ fastMode: project.isFast }).catch(() => {})
+    }
+
+    void (async () => {
+      try {
+        for await (const message of running) {
+          if (life !== this.life) {
+            return
+          }
+
+          this.handle(message)
+        }
+
+        if (life === this.life) {
+          this.ended()
+        }
+      } catch (error) {
+        if (life === this.life) {
+          this.ended(error instanceof Error ? error.message : String(error))
+        }
+      }
+    })()
+  }
+
+  handle(message) {
+    const project = this.project
+
+    if (message.type === 'system' && message.subtype === 'init') {
+      project.sessionId = message.session_id
+      // Conversations this app started or copied: it may continue them directly.
+      state.own ??= []
+
+      if (!state.own.includes(message.session_id)) {
+        state.own.push(message.session_id)
+      }
+      project.modelName = message.model
+      saveState()
+      this.emit({ t: 'init', sessionId: message.session_id, model: message.model }, false)
+
+      return
+    }
+
+    // The plan's limits moved: the Usage panel reads them again.
+    if (message.type === 'rate_limit_event') {
+      const info = message.rate_limit_info ?? {}
+      this.emit({ t: 'limit', status: info.status, kind: info.rateLimitType, resetsAt: info.resetsAt }, false)
+
+      return
+    }
+
+    if (message.type === 'stream_event') {
+      const event = message.event
+
+      if (
+        message.parent_tool_use_id === null &&
+        event.type === 'content_block_delta' &&
+        event.delta.type === 'text_delta'
+      ) {
+        this.emit({ t: 'delta', text: event.delta.text }, false)
+      } else if (
+        message.parent_tool_use_id === null &&
+        event.type === 'content_block_delta' &&
+        event.delta.type === 'thinking_delta'
+      ) {
+        this.emit({ t: 'think', text: event.delta.thinking }, false)
+      }
+
+      return
+    }
+
+    if (message.type === 'assistant') {
+      const isMain = message.parent_tool_use_id === null
+      const blocks = []
+
+      for (const block of message.message.content) {
+        if (block.type === 'text' && block.text.trim() !== '') {
+          blocks.push({ type: 'text', text: block.text })
+        } else if (block.type === 'thinking' && String(block.thinking ?? '').trim() !== '') {
+          blocks.push({ type: 'thinking', text: block.thinking })
+        } else if (block.type === 'tool_use') {
+          blocks.push({ type: 'tool_use', id: block.id, name: block.name, input: block.input })
+
+          if (block.name === 'Agent' || block.name === 'Task') {
+            this.agents.add(block.id)
+          }
+        }
+      }
+
+      const used = message.message.usage
+      const usage =
+        isMain && used
+          ? {
+              input: used.input_tokens ?? 0,
+              cacheRead: used.cache_read_input_tokens ?? 0,
+              cacheWrite: used.cache_creation_input_tokens ?? 0,
+              output: used.output_tokens ?? 0,
+            }
+          : undefined
+
+      if (blocks.length > 0 || usage) {
+        this.emit({ t: 'assistant', blocks, usage, isMain, uuid: message.uuid })
+      }
+
+      const tool = [...blocks].reverse().find(block => block.type === 'tool_use')
+
+      // A turn the engine began by itself (Claude reacting to a background agent
+      // that ended): it is a turn like any other, so its end is told too.
+      if (isMain && !this.isBusy) {
+        this.isBusy = true
+      }
+
+      if (isMain && this.status !== 'attention') {
+        this.setStatus('working', tool ? tool.name : 'Writing')
+      } else {
+        this.setStatus(this.status)
+      }
+
+      return
+    }
+
+    if (message.type === 'user') {
+      const content = message.message.content
+
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block.type === 'tool_result') {
+            this.agents.delete(block.tool_use_id)
+            this.emit({
+              t: 'tool_result',
+              id: block.tool_use_id,
+              text: flatten(block.content).slice(0, 20000),
+              pictures: picturesOf(block.content),
+              isError: block.is_error === true,
+              isMain: message.parent_tool_use_id === null,
+            })
+          }
+        }
+        this.setStatus(this.status)
+      }
+
+      return
+    }
+
+    // Agents as the engine tracks them. One started in the background, or moved
+    // there later, stays listed until the engine says it ended.
+    if (message.type === 'system' && message.subtype === 'task_started') {
+      if ((message.task_type === 'local_agent' || message.subagent_type) && message.ambient !== true) {
+        const task = { id: String(message.tool_use_id ?? message.task_id), name: String(message.description ?? 'Agent').slice(0, 120), kind: String(message.subagent_type ?? 'agent').slice(0, 60), isBackground: message.is_backgrounded === true }
+        this.tasks.set(message.task_id, task)
+
+        if (task.isBackground) {
+          this.emit({ t: 'agent-bg', id: task.id, name: task.name, kind: task.kind })
+          this.setStatus(this.status)
+        }
+      }
+
+      return
+    }
+
+    if (message.type === 'system' && message.subtype === 'task_updated') {
+      const task = this.tasks.get(message.task_id)
+
+      if (task && !task.isBackground && message.patch?.is_backgrounded === true) {
+        task.isBackground = true
+        this.emit({ t: 'agent-bg', id: task.id, name: task.name, kind: task.kind })
+        this.setStatus(this.status)
+      }
+
+      return
+    }
+
+    if (message.type === 'system' && message.subtype === 'task_notification') {
+      const task = this.tasks.get(message.task_id)
+      this.tasks.delete(message.task_id)
+
+      if (task?.isBackground) {
+        this.emit({ t: 'agent-bg-done', id: task.id, isOk: message.status === 'completed' })
+        this.setStatus(this.status)
+      }
+
+      return
+    }
+
+    // Claude Code summarized the chat so far (asked for, or by itself when the context filled up).
+    if (message.type === 'system' && message.subtype === 'compact_boundary') {
+      this.emit({ t: 'compacted', before: Number(message.compact_metadata?.pre_tokens) || 0 })
+
+      return
+    }
+
+    if (message.type === 'prompt_suggestion') {
+      if (typeof message.suggestion === 'string' && message.suggestion.trim() !== '') {
+        this.emit({ t: 'suggest', text: message.suggestion.trim().slice(0, 400) })
+      }
+
+      return
+    }
+
+    if (message.type === 'result') {
+      // A process woken only to fill the panels can end a turn nobody asked for: not chat news.
+      if (!this.isBusy) {
+        return
+      }
+
+      const windows = Object.values(message.modelUsage ?? {}).map(one => one.contextWindow ?? 0)
+      const contextWindow = Math.max(0, ...windows)
+
+      if (contextWindow > 0) {
+        project.contextWindow = contextWindow
+        saveState()
+      }
+
+      const isOk = message.subtype === 'success' && message.is_error !== true
+      const failure = String(message.result ?? message.subtype)
+      // The commonest first-run failure: Claude Code itself is not signed in.
+      const hint = /authenticat|oauth|log ?in|api key/i.test(failure)
+        ? 'Claude Code is not signed in on this computer. Press Sign in above the chat, finish the sign-in in your browser, then send your message again.'
+        : failure
+      this.emit({
+        t: 'result',
+        isOk,
+        wasStopped: this.isStopping,
+        cost: message.total_cost_usd,
+        durationMs: message.duration_ms,
+        turns: message.num_turns,
+        contextWindow,
+        error: isOk || this.isStopping ? undefined : hint,
+      })
+      this.isBusy = false
+      this.agents.clear()
+      const next = this.queue.shift()
+
+      if (next !== undefined && !this.isStopping) {
+        this.begin(next)
+      } else if (this.isStopping) {
+        this.setStatus('waiting', 'Stopped')
+      } else {
+        this.setStatus(isOk ? 'complete' : 'attention', isOk ? 'Finished' : 'Ended with an error')
+      }
+      this.isStopping = false
+    }
+  }
+
+  /** The Claude Code process ended: by itself, by a crash, or by New chat. */
+  ended(error) {
+    this.query = null
+    this.pending = []
+
+    for (const answer of this.asks.values()) {
+      answer({ behavior: 'deny', message: 'The session ended.' })
+    }
+    this.asks.clear()
+
+    // A process that was only answering the panels ends without a word in the chat.
+    if (this.isBusy) {
+      this.isBusy = false
+      this.emit({ t: 'error', message: error ?? 'Claude Code stopped before it finished.' })
+      this.setStatus('attention', 'Stopped unexpectedly')
+    }
+  }
+
+  /** Claude Code asks whether a tool may run: the window shows a card and answers. */
+  ask(tool, input, options) {
+    return new Promise(resolve => {
+      const id = randomUUID()
+      const before = { status: this.status, detail: this.detail }
+      const answer = result => {
+        if (!this.asks.delete(id)) {
+          return
+        }
+
+        this.emit({ t: 'permission-done', id, isAllowed: result.behavior === 'allow' })
+
+        if (this.isBusy) {
+          this.setStatus('working', before.detail)
+        }
+        resolve(result)
+      }
+      this.asks.set(id, answer)
+      answer.input = input
+      // "Always allow" may only add allow rules; a change of mode or of folders is not offered.
+      answer.suggestions = (options.suggestions ?? []).filter(one => one?.type === 'addRules' && one.behavior === 'allow')
+      options.signal.addEventListener('abort', () =>
+        answer({ behavior: 'deny', message: 'The request was cancelled.' }),
+      )
+      const rules = answer.suggestions.flatMap(one =>
+        (one.rules ?? []).map(rule => `${rule.toolName}${rule.ruleContent ? `(${rule.ruleContent})` : ''}`),
+      )
+      this.emit({ t: 'permission', id, tool, input, always: rules.slice(0, 12) })
+      this.setStatus('attention', tool === 'AskUserQuestion' ? 'Has a question' : `Asks to use ${tool}`)
+    })
+  }
+
+  decide(id, decision, answers) {
+    const answer = this.asks.get(id)
+
+    if (!answer) {
+      return
+    }
+
+    if (decision === 'deny') {
+      answer({ behavior: 'deny', message: 'The user declined this action.' })
+    } else if (decision === 'answer') {
+      answer({ behavior: 'allow', updatedInput: { ...answer.input, answers } })
+    } else if (decision === 'always' && answer.suggestions.length > 0) {
+      answer({ behavior: 'allow', updatedInput: answer.input, updatedPermissions: answer.suggestions })
+    } else {
+      answer({ behavior: 'allow', updatedInput: answer.input })
+    }
+  }
+
+  async stop() {
+    if (this.query !== null && this.isBusy) {
+      this.isStopping = true
+      this.queue = []
+      this.setStatus('working', 'Stopping')
+      await this.query.interrupt().catch(() => {})
+    }
+  }
+
+  /** Ends the process and forgets the conversation, for a fresh one. */
+  reset() {
+    this.life += 1
+    const old = this.query
+    this.query = null
+
+    for (const waiter of this.waiters) {
+      waiter(null)
+    }
+    this.waiters = []
+    this.pending = []
+    this.queue = []
+    this.isBusy = false
+    this.agents.clear()
+    this.tasks.clear()
+
+    for (const answer of [...this.asks.values()]) {
+      answer({ behavior: 'deny', message: 'The session ended.' })
+    }
+
+    if (old !== null) {
+      void old.return?.().catch(() => {})
+    }
+
+    this.project.sessionId = null
+    saveState()
+    fs.rm(transcriptFile(this.project.id), { force: true }, () => {})
+    this.setStatus('waiting', 'Waiting for a prompt')
+  }
+
+  /** Switches to a saved conversation: the process ends, and the next prompt resumes that one. */
+  /** Agents at work: those a tool call is waiting for, and those running in the background. */
+  get agentCount() {
+    return this.agents.size + [...this.tasks.values()].filter(one => one.isBackground && !this.agents.has(one.id)).length
+  }
+
+  adopt(sessionId, events) {
+    this.life += 1
+    const old = this.query
+    this.query = null
+
+    for (const waiter of this.waiters) {
+      waiter(null)
+    }
+    this.waiters = []
+    this.pending = []
+    this.queue = []
+    this.isBusy = false
+    this.agents.clear()
+    this.tasks.clear()
+    this.asks.clear()
+
+    if (old !== null) {
+      void old.return?.().catch(() => {})
+    }
+
+    this.project.sessionId = sessionId
+    saveState()
+    const file = transcriptFile(this.project.id)
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, events.map(event => `${JSON.stringify(event)}\n`).join(''))
+    this.setStatus('waiting', 'Ready to pick up where it left off')
+  }
+
+  /** The running Claude Code process, started without a prompt when there is none. */
+  live() {
+    if (this.query === null) {
+      this.start()
+    }
+
+    return this.query
+  }
+
+  /** Ends an idle process. The conversation is kept: the next prompt resumes it. */
+  sleep() {
+    if (this.query === null || this.isBusy || this.asks.size > 0 || this.queue.length > 0) {
+      return
+    }
+
+    this.life += 1
+    const old = this.query
+    this.query = null
+
+    for (const waiter of this.waiters) {
+      waiter(null)
+    }
+    this.waiters = []
+    void old.return?.().catch(() => {})
+  }
+
+  /** What the Usage, Model and Connectors panels show for this project. */
+  async info() {
+    const project = this.project
+    const running = this.live()
+    const [init, usage, servers] = await Promise.all([
+      running.initializationResult(),
+      running.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }).catch(() => null),
+      running.mcpServerStatus().catch(() => []),
+    ])
+
+    for (const one of init.models ?? []) {
+      if (one.supportsAdaptiveThinking !== true) {
+        plainModels.add(one.value)
+        plainModels.add(one.resolvedModel)
+      }
+    }
+
+    const models = (init.models ?? []).map(one => ({
+      value: one.value,
+      name: one.displayName,
+      description: one.description ?? '',
+      efforts: one.supportsEffort ? (one.supportedEffortLevels ?? []) : [],
+      hasFast: one.supportsFastMode === true,
+    }))
+
+    // A model the desktop app had this chat on that the list does not name.
+    if (project.model && !models.some(one => one.value === project.model)) {
+      const twin = (init.models ?? []).find(one => one.resolvedModel === project.model)
+      models.push({
+        value: project.model,
+        name: twin?.displayName ?? String(project.model).replace(/^claude-/, ''),
+        description: twin?.description ?? 'The model this chat was on in the desktop app',
+        efforts: twin ? (twin.supportedEffortLevels ?? []) : EFFORTS,
+        hasFast: twin?.supportsFastMode === true,
+      })
+    }
+
+    return {
+      models,
+      model: project.model || 'default',
+      effort: project.effort || null,
+      isFast: typeof project.isFast === 'boolean' ? project.isFast : init.fast_mode_state === 'on',
+      ...(await this.fastNow().catch(() => ({ fastState: 'off', fastBlock: '' }))),
+      usage: shapeUsage(usage),
+      servers: shapeServers(servers),
+    }
+  }
+
+  /** The slash commands and skills Claude Code has for this project, for the message box's "/" list. */
+  async commands() {
+    const all = await this.live()
+      .supportedCommands()
+      .catch(() => [])
+
+    return (Array.isArray(all) ? all : [])
+      .filter(one => typeof one?.name === 'string' && /^[\w:.-]{1,80}$/.test(one.name) && !one.name.startsWith('__'))
+      .slice(0, 400)
+      .map(one => ({ name: one.name, description: String(one.description ?? '').slice(0, 200), hint: String(one.argumentHint ?? '').slice(0, 80) }))
+  }
+
+  /** What fills the context, row by row, as Claude Code counts it (its /context report). */
+  async context() {
+    const got = await this.live()
+      .getContextUsage({ detail: 'summary' })
+      .catch(() => null)
+
+    if (!got || !Array.isArray(got.categories)) {
+      return null
+    }
+
+    const number = value => (Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0)
+
+    return {
+      model: String(got.model ?? ''),
+      total: number(got.totalTokens),
+      max: number(got.rawMaxTokens ?? got.maxTokens),
+      rows: got.categories
+        .filter(one => number(one.tokens) > 0)
+        .slice(0, 30)
+        .map(one => ({ id: String(one.id ?? ''), name: String(one.name ?? '').slice(0, 60), tokens: number(one.tokens), kind: ['used', 'free', 'buffer', 'deferred'].includes(one.kind) ? one.kind : 'used' })),
+      counts: {
+        tools: Array.isArray(got.mcpTools) ? got.mcpTools.length : 0,
+        memory: Array.isArray(got.memoryFiles) ? got.memoryFiles.length : 0,
+        agents: Array.isArray(got.agents) ? got.agents.length : 0,
+        skills: Array.isArray(got.skills) ? got.skills.length : 0,
+      },
+    }
+  }
+
+  async usage() {
+    if (this.query === null) {
+      return null
+    }
+
+    return shapeUsage(
+      await this.query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }).catch(() => null),
+    )
+  }
+
+  async servers() {
+    return shapeServers(await this.live().mcpServerStatus())
+  }
+
+  async setModel(value) {
+    const model = value === 'default' ? null : value
+    this.project.model = model
+    saveState()
+
+    if (this.query !== null) {
+      await this.query.setModel(model ?? undefined)
+    }
+  }
+
+  async setEffort(level) {
+    this.project.effort = level
+    saveState()
+
+    if (this.query !== null) {
+      await this.query.applyFlagSettings({ effortLevel: level })
+    }
+  }
+
+  async setFast(isFast) {
+    this.project.isFast = isFast
+    saveState()
+
+    if (this.query === null) {
+      return undefined
+    }
+
+    await this.query.applyFlagSettings({ fastMode: isFast })
+    const now = await this.fastNow()
+
+    // Asked for, but the account cannot have it: put it back, and say why.
+    if (isFast && now.fastBlock !== '') {
+      this.project.isFast = false
+      saveState()
+      await this.query.applyFlagSettings({ fastMode: false }).catch(() => {})
+
+      return { ...now, isFast: false }
+    }
+
+    return { ...now, isFast }
+  }
+
+  /**
+   * Whether fast mode can run, asked of the process as it now stands. Until a
+   * session asks for fast mode the process only says an app must ask first,
+   * which is no reason to grey the switch out.
+   */
+  async fastNow() {
+    const init = await this.query.reinitialize()
+    const block = init.fast_mode_disabled_reason ?? ''
+
+    return { fastState: init.fast_mode_state ?? 'off', fastBlock: block === 'sdk_opt_in_required' ? '' : block }
+  }
+
+  async setMode(mode) {
+    this.project.mode = mode
+    saveState()
+
+    if (this.query !== null) {
+      await this.query.setPermissionMode(mode).catch(() => {})
+    }
+  }
+}
+
+const sessions = new Map()
+
+const sessionOf = id => {
+  let session = sessions.get(id)
+
+  if (!session) {
+    const project = state.projects.find(one => one.id === id)
+
+    if (!project) {
+      return null
+    }
+
+    session = new Session(project)
+    sessions.set(id, session)
+  }
+
+  return session
+}
+
+const describe = project => {
+  const session = sessionOf(project.id)
+
+  return {
+    id: project.id,
+    name: project.name,
+    cwd: project.cwd,
+    mode: project.mode ?? 'default',
+    isTrusted: project.isTrusted === true,
+    model: project.model || 'default',
+    effort: project.effort || null,
+    contextWindow: project.contextWindow ?? 0,
+    hasSession: Boolean(project.sessionId),
+    status: session.status,
+    detail: session.detail,
+    queue: session.queue,
+    agents: session.agentCount,
+  }
+}
+
+/**
+ * Asks, in a system dialog the page cannot draw over, whether a newly added
+ * folder is trusted. Trusted: the folder's own Claude Code settings load
+ * (hooks, allowed tools, connectors). Not trusted: only the person's own do.
+ */
+const askTrust = async folder => {
+  const picked = await dialog.showMessageBox(win, {
+    type: 'question',
+    title: 'Cla-Amp',
+    message: 'Do you trust this folder?',
+    detail: `${folder}\n\nA folder can carry its own Claude Code settings. Those can run programs when a chat starts and let Claude use tools without asking you. Trust only folders whose contents you know, such as your own projects.\n\nYou can still chat in a folder you do not trust: its own settings are left out.`,
+    buttons: ['Open without its settings', 'Trust this folder'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  })
+
+  return picked.response === 1
+}
+
+/** A folder path as a call gave it, made whole and checked to be a real folder. */
+const realFolder = raw => {
+  const folder = path.resolve(String(raw))
+
+  try {
+    return /["%\r\n]/.test(folder) || !fs.statSync(folder).isDirectory() ? null : folder
+  } catch {
+    return null
+  }
+}
+
+/** Starts the bundled Claude Code in its own console window, for a step the person does there. */
+const openClaudeConsole = (args, cwd) => {
+  // The arguments are fixed words chosen by this app; the folder goes in as
+  // the working folder, never onto the command line.
+  if (/["%^&|<>\r\n]/.test(CLAUDE_BIN) || args.some(one => !/^[\w/-]+$/.test(one))) {
+    return false
+  }
+
+  try {
+    spawn(
+      path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'cmd.exe'),
+      ['/d', '/s', '/c', `"start "Cla-Amp" "${CLAUDE_BIN}" ${args.join(' ')}"`],
+      { cwd, env: childEnv(), windowsVerbatimArguments: true, windowsHide: true, stdio: 'ignore' },
+    ).unref()
+
+    return true
+  } catch {
+    return false
+  }
+}
+
+const sameFolder = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase()
+
+/**
+ * Opens a saved conversation in a project and continues that very
+ * conversation, so this app and the one that made it (the desktop app, the
+ * terminal) show the same chat. Only a chat copied by an older version of
+ * this app still goes to its copy, which holds the newer messages.
+ */
+/** The last few chats read from their files: chat id to { stamp, messages }. */
+const readChats = new Map()
+
+const openSaved = async (project, sessionId) => {
+  const session = sessionOf(project.id)
+
+  if (session.isBusy) {
+    return { error: `Claude is still working in ${project.name}. Stop it first, then open another chat.` }
+  }
+
+  // Only a chat that is really saved for this folder can be opened.
+  if (!/^[0-9a-f-]{36}$/i.test(sessionId) || !(await getSessionInfo(sessionId, { dir: project.cwd }).catch(() => undefined))) {
+    return { error: 'That chat is not saved for this folder any more.' }
+  }
+
+  let ours = state.copies?.[sessionId] ?? sessionId
+
+  if (ours !== sessionId && !(await getSessionInfo(ours, { dir: project.cwd }).catch(() => undefined))) {
+    ours = sessionId
+  }
+
+  // A chat's file is read whole (seconds for a long chat), so what was read is
+  // kept for the last few chats and used again while the file has not changed.
+  const stamp = (await getSessionInfo(ours, { dir: project.cwd }).catch(() => undefined))?.lastModified ?? 0
+  const kept = readChats.get(ours)
+  let messages = kept?.stamp === stamp && stamp > 0 ? kept.messages : null
+
+  if (messages === null) {
+    messages = (await getSessionMessages(ours, { dir: project.cwd })).slice(-600)
+    readChats.delete(ours)
+    readChats.set(ours, { stamp, messages })
+
+    if (readChats.size > 8) {
+      readChats.delete(readChats.keys().next().value)
+    }
+  }
+
+  const events = toEvents(project.id, messages, Date.now())
+  // The chat runs here on the model and effort it has in the desktop app.
+  followDesktop(project, sessionId)
+  session.adopt(ours, events)
+
+  return { project: describe(project), events }
+}
+
+const WATCH_EVERY = 4000
+const OWN_WRITES = 15000
+
+/**
+ * Keeps an open chat the same as its saved conversation: when another app
+ * adds to it while this one is idle, the chat is read again and shown anew.
+ */
+const watchChats = async () => {
+  for (const [id, session] of sessions) {
+    const project = session.project
+
+    if (!project.sessionId || !state.projects.includes(project)) {
+      continue
+    }
+
+    const info = await getSessionInfo(project.sessionId, { dir: project.cwd }).catch(() => undefined)
+
+    if (!info) {
+      continue
+    }
+
+    const isOurs = session.isBusy || session.agentCount > 0 || Date.now() - session.touched < OWN_WRITES
+
+    const isFirstLook = session.seen === undefined || session.watched !== project.sessionId
+    session.watched = project.sessionId
+
+    if (isOurs) {
+      // This app's own writing counts as read. Merely having opened the chat a
+      // moment ago does not: the first look waits until that moment has passed.
+      if (!isFirstLook || session.isBusy || session.agentCount > 0) {
+        session.seen = info.lastModified
+        // Kept with the project (saved along with its next change): how far this app has read the chat.
+        project.readTo = info.lastModified
+      }
+
+      continue
+    }
+
+    if (isFirstLook) {
+      // A chat that moved on in another app while this one was closed (or before
+      // it first looked) is read afresh: its file is newer than what was read here.
+      if (info.lastModified <= (project.readTo ?? 0)) {
+        session.seen = info.lastModified
+
+        continue
+      }
+    } else if (info.lastModified <= session.seen) {
+      continue
+    }
+
+    session.seen = info.lastModified
+    project.readTo = info.lastModified
+    saveState()
+    const messages = await getSessionMessages(project.sessionId, { dir: project.cwd }).catch(() => null)
+
+    if (messages === null || session.isBusy) {
+      continue
+    }
+
+    const events = toEvents(id, messages.slice(-600), Date.now())
+    session.adopt(project.sessionId, events)
+    session.touched = 0
+    send('amp:event', { projectId: id, ts: Date.now(), t: 'reload', events })
+  }
+}
+
+/**
+ * Chats and agents working outside this app (the desktop app, a terminal),
+ * for the status bar. The chats this app is running itself are left out:
+ * the window counts those from its own sessions.
+ */
+let outsideSaid = ''
+
+const watchOutside = () => {
+  const skip = new Set()
+
+  for (const session of sessions.values()) {
+    if (session.project.sessionId && (session.isBusy || session.agentCount > 0)) {
+      skip.add(session.project.sessionId)
+    }
+  }
+
+  // Each chat that is also open here as a project says which one, so its window can show the work live.
+  const openHere = new Map([...sessions].filter(([, session]) => session.project.sessionId).map(([id, session]) => [session.project.sessionId, id]))
+  const list = listOutside({ skip }).map(one => (openHere.has(one.id) ? { ...one, projectId: openHere.get(one.id) } : one))
+  // "here": the chats this app itself is working in, so the Code tab can mark them too.
+  const found = { ...countOutside(undefined, list), list, here: [...skip] }
+  const said = JSON.stringify(found)
+
+  if (said !== outsideSaid) {
+    outsideSaid = said
+    send('amp:outside', found)
+  }
+
+  return found
+}
+
+const branchOf = cwd =>
+  new Promise(resolve => {
+    execFile('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, windowsHide: true }, (error, out) =>
+      resolve(error ? '' : out.trim()),
+    )
+  })
+
+// ------------------------------------------------------- look, about, guides
+
+/**
+ * "Customize": the person's own changes to parts of the window, on top of
+ * the skin. Only known parts and fields are kept, each checked for shape; a
+ * picture must be one this app copied into its own look folder.
+ */
+const LOOK_PARTS = ['window', 'titlebar', 'banner', 'buttons', 'status', 'left', 'chat', 'composer', 'panels', 'deck']
+const lookFolder = () => path.join(dataDir(), 'look')
+
+const cleanLook = raw => {
+  const look = {}
+  const number = (value, min, max) => (typeof value === 'number' && Number.isFinite(value) ? Math.round(Math.max(min, Math.min(max, value))) : undefined)
+  const home = pathToFileURL(lookFolder()).href + '/'
+
+  for (const part of LOOK_PARTS) {
+    const from = raw?.[part]
+
+    if (!from || typeof from !== 'object') {
+      continue
+    }
+
+    const one = {}
+
+    for (const field of ['back', 'edge', 'text']) {
+      if (typeof from[field] === 'string' && /^#[0-9a-f]{6}$/i.test(from[field])) {
+        one[field] = from[field]
+      }
+    }
+
+    if (typeof from.picture === 'string' && from.picture.startsWith(home) && /^[0-9a-f]{40}\.(png|jpg|gif|webp)$/.test(from.picture.slice(home.length))) {
+      one.picture = from.picture
+    }
+
+    for (const [field, min, max] of [['show', 0, 100], ['opacity', 20, 100], ['round', 0, 24]]) {
+      const value = number(from[field], min, max)
+
+      if (value !== undefined) {
+        one[field] = value
+      }
+    }
+
+    if (Object.keys(one).length > 0) {
+      look[part] = one
+    }
+  }
+
+  return look
+}
+
+/** What the About page shows: versions, and the parts the app is built from with their licences. */
+const aboutInfo = () => {
+  const read = file => {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8'))
+    } catch {
+      return {}
+    }
+  }
+  const own = read(path.join(ROOT, 'package.json'))
+  const parts = Object.keys({ ...own.dependencies, ...own.devDependencies }).map(name => {
+    const one = read(path.join(ROOT, 'node_modules', ...name.split('/'), 'package.json'))
+
+    return { name, version: String(one.version ?? ''), licence: typeof one.license === 'string' ? one.license : 'see its own licence file' }
+  })
+
+  return { version: String(own.version ?? ''), electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node, parts }
+}
+
+/** Who is signed in to Claude Code: what `claude auth status` says, a few fields of it. */
+const accountInfo = () =>
+  new Promise(resolve => {
+    execFile(CLAUDE_BIN, ['auth', 'status'], { env: childEnv(), windowsHide: true, timeout: 20000 }, (_error, out) => {
+      try {
+        const said = JSON.parse(out)
+        const text = value => (typeof value === 'string' ? value.slice(0, 200) : '')
+
+        resolve({
+          isSignedIn: said.loggedIn === true,
+          email: text(said.email),
+          organization: text(said.orgName ?? said.organization),
+          plan: text(said.subscriptionType),
+          method: text(said.authMethod),
+        })
+      } catch {
+        resolve({ isSignedIn: false })
+      }
+    })
+  })
+
+/** Claude Code's settings files for the person and for one project: user, project, local. */
+const settingsFiles = project => [
+  { which: 'user', label: 'Yours, for every project', file: path.join(process.env.CLAUDE_CONFIG_DIR || path.join(app.getPath('home'), '.claude'), 'settings.json') },
+  ...(project
+    ? [
+        { which: 'project', label: `This project (${project.name}), shared with it`, file: path.join(project.cwd, '.claude', 'settings.json') },
+        { which: 'local', label: `This project (${project.name}), yours only`, file: path.join(project.cwd, '.claude', 'settings.local.json') },
+      ]
+    : []),
+]
+
+/** What a settings file sets, as short lists. Environment variables by name only: their values can be secrets. */
+const summarizeSettings = file => {
+  try {
+    const said = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const words = value => (Array.isArray(value) ? value.filter(one => typeof one === 'string').slice(0, 200).map(one => one.slice(0, 160)) : [])
+    const known = ['model', 'permissions', 'hooks', 'env', 'enabledPlugins']
+
+    return {
+      model: typeof said.model === 'string' ? said.model.slice(0, 80) : '',
+      defaultMode: typeof said.permissions?.defaultMode === 'string' ? said.permissions.defaultMode.slice(0, 40) : '',
+      allow: words(said.permissions?.allow),
+      ask: words(said.permissions?.ask),
+      deny: words(said.permissions?.deny),
+      hooks: Object.entries(said.hooks ?? {}).map(([event, rules]) => `${event}: ${Array.isArray(rules) ? rules.length : 1}`).slice(0, 40),
+      env: Object.keys(said.env ?? {}).slice(0, 80).map(one => one.slice(0, 80)),
+      plugins: Object.entries(said.enabledPlugins ?? {}).filter(([, isOn]) => isOn === true).map(([name]) => name.slice(0, 80)).slice(0, 200),
+      other: Object.keys(said).filter(key => !known.includes(key)).slice(0, 60).map(one => one.slice(0, 80)),
+    }
+  } catch {
+    return { error: 'This file could not be read as settings (it may be half-written or not valid).' }
+  }
+}
+
+// -------------------------------------------------------------- player window
+
+/**
+ * The music player is a real browser window with a profile of its own. A
+ * small helper (deck/player-window.ps1) makes that window belong to the
+ * Cla-Amp window: it sits docked beside it, minimises with it, has no
+ * taskbar button, can be hidden while the music plays on, and closes with
+ * the app. The helper only moves, shows, hides and closes the window; nothing
+ * in it is read.
+ */
+let playerHelper = null
+let playerState = { count: 0, hidden: false, shown: 0, hasClaude: false }
+// Cla-Amp was maximised and gave the player its strip of the screen: where it was before.
+let dockedFrom = null
+let isFitting = false
+const PLAYER_LEAST = 340
+let isRestarting = false
+// The person said yes to closing while Claude works; not asked twice.
+let isCloseAgreed = false
+let tray = null
+
+/**
+ * The icon by the clock: one place to bring Cla-Amp up, show or tuck away
+ * its docked window, and quit. Quitting from here closes everything that
+ * belongs to Cla-Amp, the hidden browser windows included.
+ */
+const refreshTray = () => {
+  if (tray === null || win === null || win.isDestroyed()) {
+    return
+  }
+
+  const hasDocked = playerState.count > 0 || playerState.hasClaude
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: 'Open Cla-Amp',
+        click: () => {
+          win.show()
+          win.restore()
+          win.focus()
+        },
+      },
+      {
+        label: playerState.hidden ? 'Show the docked window' : 'Hide the docked window',
+        enabled: hasDocked,
+        click: () => {
+          state.prefs.playerHidden = !playerState.hidden
+          saveState()
+          playerSay(state.prefs.playerHidden ? 'hide' : 'show')
+        },
+      },
+      { type: 'separator' },
+      { label: 'Quit Cla-Amp (closes its player and claude.ai windows too)', click: () => win.close() },
+    ]),
+  )
+}
+
+const startTray = () => {
+  if (tray !== null || SHOT) {
+    return
+  }
+
+  try {
+    tray = new Tray(path.join(ROOT, 'renderer', 'brand', 'icon.ico'))
+    tray.setToolTip('Cla-Amp')
+    tray.on('click', () => {
+      win?.show()
+      win?.restore()
+      win?.focus()
+    })
+    refreshTray()
+  } catch {
+    // No tray on this system: the window's own buttons do the same.
+    tray = null
+  }
+}
+let placeTimer = null
+// YouTube Music's page fits a narrow window. Spotify's does not: below about
+// 800 its sign-in button and song lists are cut off.
+const PLAYER_WIDTH = { ytm: 460, spotify: 900, claude: 960 }
+const playerProfile = () => path.join(dataDir(), 'player-profile')
+
+const playerSay = line => {
+  if (playerHelper !== null && playerHelper.stdin.writable) {
+    playerHelper.stdin.write(line + '\n')
+  }
+}
+
+/**
+ * The two windows share the screen. When Cla-Amp is maximised, or made so
+ * wide that the player has no room beside it, Cla-Amp stops where the
+ * player begins: it never lies under the player. Cla-Amp comes first: it
+ * keeps at least its smallest width and the player narrows to what is left.
+ */
+const makeRoom = () => {
+  if (isFitting || win === null || win.isDestroyed() || win.isMinimized() || win.isFullScreen() || playerState.shown === 0) {
+    return
+  }
+
+  const isMax = win.isMaximized()
+  const own = win.getBounds()
+  const area = screen.getDisplayMatching(own).workArea
+  const want = PLAYER_WIDTH[state.prefs.playerSite] ?? PLAYER_WIDTH.ytm
+  const least = win.getMinimumSize()[0]
+  const width = Math.min(want, area.width - least)
+
+  // A screen too small for both: the player lies over the edge, as before.
+  if (width < PLAYER_LEAST) {
+    return
+  }
+
+  const right = area.x + area.width
+
+  if (!isMax && (own.x + own.width + PLAYER_LEAST <= right || own.x - want >= area.x)) {
+    return
+  }
+
+  isFitting = true
+
+  try {
+    if (isMax) {
+      dockedFrom = win.getNormalBounds()
+      win.unmaximize()
+      win.setBounds({ x: area.x, y: area.y, width: area.width - width, height: area.height })
+    } else {
+      const mine = Math.min(own.width, area.width - width)
+      win.setBounds({ x: Math.max(area.x, Math.min(own.x, right - width - mine)), y: own.y, width: mine, height: own.height })
+    }
+  } finally {
+    isFitting = false
+  }
+  send('amp:docked', dockedFrom !== null)
+  placePlayer()
+}
+
+/** The player came on show or went away: Cla-Amp gives it room, or takes the whole screen back. */
+const playerCameOrWent = () => {
+  if (win === null || win.isDestroyed()) {
+    return
+  }
+
+  if (playerState.shown > 0) {
+    makeRoom()
+  } else if (dockedFrom !== null) {
+    dockedFrom = null
+    win.maximize()
+  }
+}
+
+/** Where the player goes: right of the Cla-Amp window, else left of it, else over its right edge. */
+const playerRect = () => {
+  if (win === null || win.isDestroyed() || win.isMinimized()) {
+    return null
+  }
+
+  const own = win.getBounds()
+  const area = screen.getDisplayMatching(own).workArea
+  const want = Math.min(PLAYER_WIDTH[state.prefs.playerSite] ?? PLAYER_WIDTH.ytm, area.width)
+  const beside = area.x + area.width - (own.x + own.width)
+  // Narrower than it likes, when that is what fits beside Cla-Amp.
+  const width = beside >= want || own.x - want >= area.x || beside < PLAYER_LEAST ? want : beside
+  const y = Math.max(own.y, area.y)
+  const height = Math.max(Math.min(own.y + own.height, area.y + area.height) - y, 200)
+  const x = own.x + own.width + width <= area.x + area.width ? own.x + own.width : own.x - width >= area.x ? own.x - width : area.x + area.width - width
+
+  return screen.dipToScreenRect(win, { x, y, width, height })
+}
+
+const placePlayer = () => {
+  if (playerHelper === null || placeTimer !== null) {
+    return
+  }
+
+  placeTimer = setTimeout(() => {
+    placeTimer = null
+    const rect = playerRect()
+
+    if (rect !== null) {
+      playerSay(`place ${Math.round(rect.x)} ${Math.round(rect.y)} ${Math.round(rect.width)} ${Math.round(rect.height)}`)
+    }
+  }, 30)
+}
+
+const startPlayerHelper = () => {
+  if (playerHelper !== null || process.platform !== 'win32' || win === null || win.isDestroyed()) {
+    return
+  }
+
+  const handle = win.getNativeWindowHandle()
+  const owner = handle.length >= 8 ? handle.readBigUInt64LE(0) : BigInt(handle.readUInt32LE(0))
+  const helper = spawn(
+    path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoProfile', '-Command', '& ([scriptblock]::Create([IO.File]::ReadAllText($env:CA_SCRIPT)))'],
+    {
+      env: { ...process.env, CA_SCRIPT: path.join(ROOT, 'deck', 'player-window.ps1'), CA_PROFILE: playerProfile(), CA_OWNER: String(owner) },
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'ignore'],
+    },
+  )
+  playerHelper = helper
+  helper.stdin.on('error', () => {})
+  readline.createInterface({ input: helper.stdout }).on('line', line => {
+    if (line.startsWith('@')) {
+      try {
+        const said = JSON.parse(line.slice(1))
+        const hadPlayer = playerState.shown > 0
+        const sites = Array.isArray(said.sites) ? said.sites : []
+        // count: the music players' windows; the claude.ai window is told apart.
+        playerState = {
+          count: Array.isArray(said.sites) ? sites.filter(one => one !== 'claude').length : Number(said.count) || 0,
+          hidden: said.hidden === true,
+          shown: Number(said.shown) || 0,
+          hasClaude: sites.includes('claude'),
+        }
+        playerSites = sites
+        tellBrowserSite()
+
+        if (hadPlayer !== playerState.shown > 0) {
+          playerCameOrWent()
+        }
+        refreshTray()
+        send('amp:player', playerState)
+      } catch {
+        // A cut line: the next one is whole.
+      }
+    }
+  })
+  helper.on('exit', () => {
+    if (playerHelper === helper) {
+      playerHelper = null
+      playerState = { count: 0, hidden: false, shown: 0, hasClaude: false }
+      playerSites = []
+      tellBrowserSite()
+      playerCameOrWent()
+      refreshTray()
+      send('amp:player', playerState)
+    }
+  })
+
+  playerSay(`site ${['spotify', 'claude'].includes(state.prefs.playerSite) ? state.prefs.playerSite : 'ytm'}`)
+
+  if (state.prefs.playerHidden === true) {
+    playerSay('hide')
+  }
+  placePlayer()
+}
+
+// ----------------------------------------------------------------- audio deck
+
+let deck = null
+let deckSeq = 0
+let deckLines = []
+// Which players' browser windows are open, and what the music helper was last told.
+let playerSites = []
+let saidBrowserSite = ''
+
+/**
+ * Windows reports a browser's music under the browser's name, not the
+ * site's. So the helper is told which player the browser window holds:
+ * Spotify's web player then shows on the Spotify tab, not under YouTube
+ * Music. With both open, the one on show counts.
+ */
+const tellBrowserSite = () => {
+  const hasSpotify = playerSites.includes('spotify')
+  const hasYtm = playerSites.includes('ytm')
+  const site = hasSpotify && (!hasYtm || state.prefs.playerSite === 'spotify') ? 'spotify' : hasYtm ? 'ytm' : ''
+
+  if (site !== saidBrowserSite && deck !== null) {
+    saidBrowserSite = site
+    deckCommand('web-site', site)
+  }
+}
+const deckFile = () => path.join(dataDir(), 'deck-commands.txt')
+
+// When the helper was started again after ending early, to stop a loop of restarts.
+let deckRestarts = []
+
+const startDeck = () => {
+  if (deck !== null || process.platform !== 'win32') {
+    return
+  }
+
+  fs.mkdirSync(dataDir(), { recursive: true })
+  fs.writeFileSync(deckFile(), '')
+  deckSeq = 0
+  deckLines = []
+  // The script is read and run as text, so no script-policy setting is touched.
+  deck = spawn(
+    // By full path, so a look-alike elsewhere on the search path is never the one started.
+    path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoProfile', '-Command', '& ([scriptblock]::Create([IO.File]::ReadAllText($env:CA_DECK)))'],
+    {
+      env: { ...process.env, CA_CMD: deckFile(), CA_DECK: path.join(ROOT, 'deck', 'deck.ps1'), CA_FAST: '1', CA_PROFILE: playerProfile() },
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    },
+  )
+  readline.createInterface({ input: deck.stdout }).on('line', line => {
+    if (line.startsWith('@')) {
+      try {
+        send('amp:deck', JSON.parse(line.slice(1)))
+      } catch {
+        // A cut line: the next one is whole.
+      }
+    }
+  })
+  // A new helper knows nothing yet about the browser's player.
+  saidBrowserSite = ''
+  tellBrowserSite()
+  deck.on('exit', () => {
+    deck = null
+    // The helper should live as long as the window. If it ends early, the
+    // spectrum would stay dead: it is started again, a few times at most.
+    const now = Date.now()
+    deckRestarts = deckRestarts.filter(at => now - at < 300000)
+
+    if (win !== null && !win.isDestroyed() && deckRestarts.length < 5) {
+      deckRestarts.push(now)
+      setTimeout(() => {
+        if (win !== null && !win.isDestroyed()) {
+          startDeck()
+        }
+      }, 2000)
+    }
+  })
+}
+
+const deckCommand = (command, argument = '') => {
+  startDeck()
+  deckSeq += 1
+  deckLines = [...deckLines, `${deckSeq}|${command}|${argument}`].slice(-20)
+  fs.writeFileSync(deckFile(), deckLines.join('\n'))
+
+  return deckSeq
+}
+
+// The songs the deck may open: the ones found in the music folders, and the
+// ones in a playlist the person picked. Never a path the page made up.
+let knownSongs = new Set()
+let tagCache = null
+const tagFile = () => path.join(dataDir(), 'music-tags.json')
+
+const musicFolders = () => {
+  const saved = Array.isArray(state.prefs.musicFolders)
+    ? state.prefs.musicFolders
+    : [state.prefs.musicFolder ?? path.join(app.getPath('home'), 'Music')]
+
+  return saved.filter(one => typeof one === 'string').slice(0, 40)
+}
+
+/** Every song in the person's music folders, with its details. Details are kept between runs. */
+const scanSongs = () => {
+  if (tagCache === null) {
+    try {
+      tagCache = JSON.parse(fs.readFileSync(tagFile(), 'utf8'))
+    } catch {
+      tagCache = {}
+    }
+  }
+
+  const before = JSON.stringify(tagCache)
+  const folders = musicFolders()
+  const files = scanFolders(folders, tagCache)
+  knownSongs = new Set(files.map(one => one.path))
+
+  if (JSON.stringify(tagCache) !== before) {
+    fs.mkdirSync(dataDir(), { recursive: true })
+    fs.writeFile(tagFile(), JSON.stringify(tagCache), () => {})
+  }
+
+  return { folders, files }
+}
+
+// ---------------------------------------------------------------------- skins
+
+const SKIN_NAME = /^[a-z0-9][a-z0-9-]{0,40}$/i
+
+/**
+ * Reads a skin's stylesheet before the window may load it.
+ *  - 'refused': it reaches outside its own folder (the internet, a network
+ *    share, another folder) or pulls in another stylesheet. Never loaded.
+ *  - 'colours': nothing but variables in one :root block. Safe to load.
+ *  - 'full': rules of its own. It can restyle or hide anything in the window,
+ *    the permission cards included, so the person is asked first.
+ */
+const checkSkin = css => {
+  const bare = css.replace(/\/\*[\s\S]*?\*\//g, '')
+
+  if (bare.includes('\\')) {
+    return { kind: 'refused', why: 'It uses a backslash, which can hide what a rule really says.' }
+  }
+
+  if (/@import|@namespace|image-set\s*\(|expression\s*\(/i.test(bare)) {
+    return { kind: 'refused', why: 'It pulls in another stylesheet or picture set.' }
+  }
+
+  // A picture or font must be a plain file name in the skin's own folder.
+  for (const [, inner] of bare.matchAll(/url\s*\(([^)]*)\)/gi)) {
+    if (!/^\s*(['"]?)[A-Za-z0-9][A-Za-z0-9 _.-]{0,80}\1\s*$/.test(inner) || inner.includes('..')) {
+      return { kind: 'refused', why: 'It loads a file from outside its own folder.' }
+    }
+  }
+
+  // Outside url(), a quoted or bare address must not point at another computer.
+  if (/(^|[\s:,(])(['"]?)(\/\/|[a-z][a-z0-9+.-]*:\/\/)/i.test(bare.replace(/url\s*\([^)]*\)/gi, ''))) {
+    return { kind: 'refused', why: 'It names an address on another computer.' }
+  }
+
+  const block = /^\s*:root\s*\{([^{}]*)\}\s*$/.exec(bare)
+  const isOnlyVariables =
+    bare.trim() === '' ||
+    (block !== null &&
+      block[1]
+        .split(';')
+        .map(one => one.trim())
+        .filter(Boolean)
+        .every(one => /^--[\w-]+\s*:[^@]+$/.test(one)))
+
+  return { kind: isOnlyVariables ? 'colours' : 'full', why: '' }
+}
+const userSkins = () => path.join(dataDir(), 'skins')
+
+/**
+ * The skins on this computer: the ones the app ships with, then the person's
+ * own. A skin is a folder holding skin.css and skin.json and nothing that
+ * runs: the window loads the stylesheet and never a script from it.
+ */
+const listSkins = () => {
+  const found = []
+
+  for (const [folder, isOwn] of [
+    [path.join(ROOT, 'skins'), false],
+    [userSkins(), true],
+  ]) {
+    let names = []
+
+    try {
+      names = fs
+        .readdirSync(folder, { withFileTypes: true })
+        .filter(entry => entry.isDirectory() && SKIN_NAME.test(entry.name))
+        .map(entry => entry.name)
+        .sort()
+    } catch {
+      continue
+    }
+
+    for (const name of names.slice(0, 200)) {
+      const sheet = path.join(folder, name, 'skin.css')
+      let about = {}
+
+      try {
+        // A stylesheet far larger than any skin needs is left out.
+        if (fs.statSync(sheet).size > 2 * 1024 * 1024) {
+          continue
+        }
+
+        about = JSON.parse(fs.readFileSync(path.join(folder, name, 'skin.json'), 'utf8').slice(0, 20000))
+      } catch (error) {
+        if (!fs.existsSync(sheet)) {
+          continue
+        }
+      }
+
+      // What the stylesheet holds decides how far it is trusted.
+      let kind = 'refused'
+      let why = ''
+
+      try {
+        const checked = checkSkin(fs.readFileSync(sheet, 'utf8'))
+        kind = checked.kind
+        why = checked.why
+      } catch {
+        why = 'The stylesheet could not be read.'
+      }
+
+      const words = (value, fallback) => (typeof value === 'string' && value.trim() !== '' ? value.trim().slice(0, 200) : fallback)
+      found.push({
+        id: `${isOwn ? 'mine' : 'built-in'}/${name}`,
+        name: words(about?.name, name),
+        author: words(about?.author, ''),
+        description: words(about?.description, ''),
+        isOwn,
+        kind,
+        why,
+        sheet,
+        url: pathToFileURL(sheet).href,
+      })
+    }
+  }
+
+  return found
+}
+
+/**
+ * The variables of a skin that name a picture, with each picture's address
+ * made whole. A picture named in a variable would otherwise be looked for
+ * beside the app's own stylesheet, where the variable is used, and not in
+ * the skin's folder. Only plain file names get here: checkSkin refuses the rest.
+ */
+const skinPictures = sheet => {
+  const found = {}
+
+  try {
+    const bare = fs.readFileSync(sheet, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '')
+    const block = /:root\s*\{([^{}]*)\}/.exec(bare)
+
+    for (const one of (block?.[1] ?? '').split(';')) {
+      const [, name, value] = /^\s*(--[\w-]+)\s*:([\s\S]+)$/.exec(one) ?? []
+
+      if (name && /url\s*\(/i.test(value)) {
+        found[name] = value
+          .trim()
+          .replace(/url\s*\(\s*(['"]?)([A-Za-z0-9][A-Za-z0-9 _.-]{0,80})\1\s*\)/gi, (_all, _quote, file) =>
+            `url("${pathToFileURL(path.join(path.dirname(sheet), file)).href}")`,
+          )
+      }
+    }
+  } catch {
+    // A sheet that cannot be read has no pictures to place.
+  }
+
+  return found
+}
+
+// ------------------------------------------------------------------ dictation
+
+/**
+ * Speech to text for the message box. A helper script runs only while the
+ * microphone button is on; it uses Windows' built-in recogniser, so the
+ * sound never leaves the computer and the window itself is never given the
+ * microphone. See deck/dictate.ps1.
+ */
+let dictation = null
+
+const stopDictation = () => {
+  dictation?.kill()
+  dictation = null
+}
+
+const startDictation = () => {
+  if (process.platform !== 'win32') {
+    return { error: 'Dictation works on Windows only.' }
+  }
+
+  if (dictation !== null) {
+    return { isOn: true }
+  }
+
+  const helper = spawn(
+    path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoProfile', '-Command', '& ([scriptblock]::Create([IO.File]::ReadAllText($env:CA_DICTATE)))'],
+    {
+      env: { ...process.env, CA_DICTATE: path.join(ROOT, 'deck', 'dictate.ps1'), CA_WAV: IS_DEV ? (process.env.CA_WAV ?? '') : '' },
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    },
+  )
+  dictation = helper
+  readline.createInterface({ input: helper.stdout }).on('line', line => {
+    if (!line.startsWith('@')) {
+      return
+    }
+
+    try {
+      const heard = JSON.parse(line.slice(1))
+      // Only the fields the window expects, as plain text.
+      send('amp:dictate', {
+        ...(heard.ready ? { ready: true } : {}),
+        ...(heard.done ? { done: true } : {}),
+        ...(typeof heard.text === 'string' ? { text: heard.text.slice(0, 2000) } : {}),
+        ...(typeof heard.error === 'string' ? { error: heard.error.slice(0, 300) } : {}),
+      })
+    } catch {
+      // A cut line: the next one is whole.
+    }
+  })
+  helper.on('exit', () => {
+    if (dictation === helper) {
+      dictation = null
+      send('amp:dictate', { done: true })
+    }
+  })
+  helper.on('error', () => {})
+
+  return { isOn: true }
+}
+
+// --------------------------------------------------------------- live updates
+
+/**
+ * Tells the open window when the app's own files or a skin change on disk, so
+ * a change shows without closing the app. Three kinds: 'styles' (put on at
+ * once), 'page' (the window offers to reload itself) and 'app' (the window
+ * offers a restart). Nothing is fetched and nothing new is run: the window
+ * only reads again the same local files it reads when it opens.
+ */
+const updateKinds = new Set()
+let updateTimer = null
+
+const noteUpdate = kind => {
+  updateKinds.add(kind)
+  clearTimeout(updateTimer)
+  // Editors save in several writes; wait for them to settle.
+  updateTimer = setTimeout(() => {
+    for (const one of updateKinds) {
+      send('amp:update', { kind: one })
+    }
+    updateKinds.clear()
+  }, 400)
+}
+
+const watchingSince = Date.now()
+const lastSaved = new Map()
+
+const watchForUpdates = () => {
+  const watch = (folder, isDeep, kindOf) => {
+    try {
+      const watcher = fs.watch(folder, { recursive: isDeep }, (_change, name) => {
+        const kind = name ? kindOf(String(name).replace(/\\/g, '/')) : ''
+
+        if (!kind) {
+          return
+        }
+
+        // Windows also reports a file being read. Only a save counts: the
+        // file's own "last written" time must have moved on.
+        const file = path.join(folder, String(name))
+        let savedAt = Date.now()
+
+        try {
+          savedAt = fs.statSync(file).mtimeMs
+        } catch {
+          // Gone: a deleted file is a change too.
+        }
+
+        if (savedAt > (lastSaved.get(file) ?? watchingSince)) {
+          lastSaved.set(file, savedAt)
+          noteUpdate(kind)
+        }
+      })
+      watcher.on('error', () => {})
+    } catch {
+      // A folder that cannot be watched just means no live updates from it.
+    }
+  }
+
+  // The person's own skins, so a skin maker sees each save.
+  watch(dataDir(), true, name => (/^skins\/.+\.(css|json|png|jpe?g|gif|bmp|webp|svg)$/i.test(name) ? 'styles' : ''))
+
+  // An installed copy's own files do not change while it runs.
+  if (app.isPackaged) {
+    return
+  }
+
+  watch(path.join(ROOT, 'skins'), true, name => (/\.(css|json|png|jpe?g|gif|bmp|webp|svg)$/i.test(name) ? 'styles' : ''))
+  watch(path.join(ROOT, 'renderer'), true, name => (/\.css$/i.test(name) ? 'styles' : /\.(js|html)$/i.test(name) ? 'page' : ''))
+  watch(ROOT, false, name => (/^[^/]+\.(mjs|cjs)$/i.test(name) || name === 'package.json' ? 'app' : ''))
+  watch(path.join(ROOT, 'deck'), true, () => 'app')
+}
+
+// ---------------------------------------------------------------------- calls
+
+/** A call whose failure is told to the window as words, not thrown at it. */
+// What the Claude desktop app knows about its own chats: the title it shows,
+// whether it archived the chat, the project a worktree chat belongs to, and
+// which chat started it. Only read, never written: the app's records are its
+// own, their layout is not documented, and a record that does not look as
+// expected is skipped. Kept for twenty seconds.
+const desk = { at: 0, byChat: new Map() }
+
+const deskFolders = () => {
+  const found = []
+  const local = process.env.LOCALAPPDATA
+
+  // Installed from the Store, the app keeps its data one folder further in.
+  if (local && fs.existsSync(path.join(local, 'Claude-Data'))) {
+    for (const one of fs.readdirSync(path.join(local, 'Claude-Data'), { withFileTypes: true })) {
+      if (one.isDirectory()) {
+        found.push(path.join(local, 'Claude-Data', one.name, 'claude-code-sessions'))
+      }
+    }
+  }
+  found.push(path.join(app.getPath('appData'), 'Claude', 'claude-code-sessions'))
+
+  return found.filter(one => fs.existsSync(one))
+}
+
+const deskChats = () => {
+  if (IS_DEMO || Date.now() - desk.at < 20000) {
+    return desk.byChat
+  }
+
+  desk.at = Date.now()
+  const records = []
+  const walk = (dir, depth) => {
+    for (const one of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (records.length >= 4000) {
+        return
+      }
+
+      const full = path.join(dir, one.name)
+
+      if (one.isDirectory() && depth < 3) {
+        walk(full, depth + 1)
+      } else if (/^local_[0-9a-f-]{36}\.json$/i.test(one.name) && fs.statSync(full).size < 4000000) {
+        try {
+          const said = JSON.parse(fs.readFileSync(full, 'utf8'))
+
+          if (typeof said?.sessionId === 'string' && /^[0-9a-f-]{36}$/i.test(String(said.cliSessionId))) {
+            records.push(said)
+          }
+        } catch {
+          // Half-written or not what was expected: left out this time.
+        }
+      }
+    }
+  }
+
+  try {
+    for (const dir of deskFolders()) {
+      walk(dir, 0)
+    }
+  } catch {
+    return desk.byChat
+  }
+
+  const chatOf = new Map(records.map(one => [one.sessionId, one.cliSessionId]))
+  const byChat = new Map()
+
+  for (const one of records) {
+    const about = {
+      title: typeof one.title === 'string' ? one.title.replace(/\s+/g, ' ').trim().slice(0, 140) : '',
+      isArchived: one.isArchived === true,
+      folder: typeof one.originCwd === 'string' ? one.originCwd.slice(0, 500) : '',
+      parent: chatOf.get(one.spawnedFrom?.sessionId) ?? '',
+      // Its pull requests as the desktop app last saw them: number, repository, state and branch.
+      prs: (Array.isArray(one.prs) ? one.prs : [])
+        .filter(pr => Number.isInteger(pr?.prNumber) && typeof pr.repo === 'string')
+        .slice(0, 60)
+        .map(pr => ({
+          number: pr.prNumber,
+          repo: pr.repo.slice(0, 100),
+          state: ['MERGED', 'OPEN', 'CLOSED'].includes(pr.state) ? pr.state : '',
+          branch: String(pr.branch ?? '').slice(0, 120),
+        })),
+      at: Number(one.lastActivityAt) || 0,
+    }
+    const ids = [one.cliSessionId, ...(Array.isArray(one.priorCliSessionIds) ? one.priorCliSessionIds : [])]
+
+    for (const id of ids) {
+      if (typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id) && (byChat.get(id)?.at ?? -1) < about.at) {
+        byChat.set(id, about)
+      }
+    }
+  }
+  desk.byChat = byChat
+
+  return byChat
+}
+
+// Which saved chats this app's engine started: such a chat's file names the
+// engine's entry point in its first lines ("sdk-ts"; the desktop app writes
+// "claude-desktop", a terminal "cli"). Only those may be archived or deleted
+// from here. The answer for a chat never changes, so it is kept.
+const madeHereKept = new Map()
+
+const madeHere = (sessionId, cwd) => {
+  if (!/^[0-9a-f-]{36}$/i.test(String(sessionId)) || typeof cwd !== 'string') {
+    return false
+  }
+
+  if (!madeHereKept.has(sessionId)) {
+    let isOurs = false
+
+    try {
+      const file = path.join(chatsFolder(), cwd.replace(/[^a-zA-Z0-9]/g, '-'), sessionId + '.jsonl')
+      const handle = fs.openSync(file, 'r')
+      const part = Buffer.alloc(200000)
+      const size = fs.readSync(handle, part, 0, part.length, 0)
+      fs.closeSync(handle)
+      isOurs = /"entrypoint":"([^"]*)"/.exec(part.subarray(0, size).toString('utf8'))?.[1] === 'sdk-ts'
+    } catch {
+      // Not where expected: treated as not ours.
+    }
+    madeHereKept.set(sessionId, isOurs)
+  }
+
+  return madeHereKept.get(sessionId) && !deskChats().has(sessionId)
+}
+
+/**
+ * Archives or deletes a chat that was made in this app. A chat from the
+ * desktop app or a terminal is refused, and so is one that is open here.
+ */
+const putAway = async (sessionId, cwd, isDelete) => {
+  const id = String(sessionId)
+  const folder = realFolder(cwd)
+
+  if (folder === null || !madeHere(id, String(cwd)) || !(await getSessionInfo(id, { dir: folder }).catch(() => undefined))) {
+    return { error: 'Only a chat that was made in Cla-Amp can be archived or deleted here.' }
+  }
+
+  if (state.projects.some(one => one.sessionId === id)) {
+    return { error: 'This chat is open in a project. Start a new chat there (or open another one) first.' }
+  }
+
+  if (isDelete) {
+    const title = titleOf((await getSessionInfo(id, { dir: folder })) ?? {})
+    const picked = await dialog.showMessageBox(win, {
+      type: 'warning',
+      title: 'Cla-Amp',
+      message: 'Delete this chat for good?',
+      detail: `${title}\n${folder}\n\nThe saved conversation is removed from this computer. This cannot be undone. Archive it instead to only hide it.`,
+      buttons: ['Keep it', 'Delete'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    })
+
+    if (picked.response !== 1) {
+      return { isOk: false }
+    }
+
+    await deleteSession(id, { dir: folder })
+  } else {
+    await archiveSession(id, { dir: folder })
+  }
+  readChats.delete(id)
+
+  return { isOk: true }
+}
+
+// ---- themes: a skin plus the person's own changes, saved under a name.
+// Each is one small file in this app's own "themes" folder. What a file may
+// hold is fixed here, and everything read from one is cleaned the same way.
+const themesFolder = () => path.join(dataDir(), 'themes')
+const THEME_FILE = /^[a-z0-9-]{1,50}$/
+
+const cleanTheme = raw => {
+  const layout = raw?.layout && typeof raw.layout === 'object' ? raw.layout : {}
+  const words = (list, most, long) => (Array.isArray(list) ? list.filter(one => typeof one === 'string' && one.length <= long).slice(0, most) : undefined)
+  const name = String(raw?.name ?? '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 60)
+
+  if (name === '' || typeof raw?.skin !== 'string' || raw.skin.length > 80) {
+    return null
+  }
+
+  const kept = {
+    panels: Array.isArray(layout.panels) ? layout.panels.filter(one => Array.isArray(one) && typeof one[0] === 'string' && one[0].length <= 30).slice(0, 40).map(one => [one[0], one[1] === true, one[2] === 1 ? 1 : 0]) : undefined,
+    widgets: words(layout.widgets, 10, 20),
+    zones: words(layout.zones, 5, 60),
+    playerSize: ['s', 'm', 'l'].includes(layout.playerSize) ? layout.playerSize : undefined,
+    col2: ['0', '1', 0, 1].includes(layout.col2) ? String(layout.col2) : undefined,
+  }
+
+  return {
+    name,
+    skin: raw.skin,
+    look: cleanLook(raw.look),
+    layout: Object.fromEntries(Object.entries(kept).filter(([, value]) => value !== undefined)),
+    savedAt: Number.isFinite(raw.savedAt) ? raw.savedAt : Date.now(),
+  }
+}
+
+const listThemes = () => {
+  try {
+    return fs
+      .readdirSync(themesFolder())
+      .filter(one => one.endsWith('.json') && THEME_FILE.test(one.slice(0, -5)))
+      .slice(0, 200)
+      .map(one => {
+        try {
+          const file = path.join(themesFolder(), one)
+          const theme = fs.statSync(file).size < 300000 ? cleanTheme(JSON.parse(fs.readFileSync(file, 'utf8'))) : null
+
+          return theme ? { ...theme, file: one.slice(0, -5) } : null
+        } catch {
+          return null
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.name.localeCompare(b.name))
+  } catch {
+    return []
+  }
+}
+
+const saveTheme = raw => {
+  const theme = cleanTheme({ ...raw, savedAt: Date.now() })
+
+  if (theme === null) {
+    return { error: 'A theme needs a name.' }
+  }
+
+  const file = theme.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50) || 'theme'
+  fs.mkdirSync(themesFolder(), { recursive: true })
+  fs.writeFileSync(path.join(themesFolder(), file + '.json'), JSON.stringify(theme, null, 2))
+
+  // A rename: the file under the old name goes.
+  if (typeof raw?.replaces === 'string' && THEME_FILE.test(raw.replaces) && raw.replaces !== file) {
+    fs.rmSync(path.join(themesFolder(), raw.replaces + '.json'), { force: true })
+  }
+
+  return { ...theme, file }
+}
+
+// ---- widgets: today's numbers.
+
+// Today across every chat on this computer: how many were worked on, and how
+// many messages the person sent. Counted from the end of each chat's file
+// that changed today (the last four megabytes), at most once a minute.
+const todayKept = { at: 0, said: null }
+
+const todayStats = async () => {
+  if (Date.now() - todayKept.at < 55000 && todayKept.said) {
+    return todayKept.said
+  }
+
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  const since = start.getTime()
+  const chats = (await listSessions({ limit: 5000 })).filter(one => one.lastModified >= since && one.cwd)
+  let prompts = 0
+
+  for (const one of chats.slice(0, 60)) {
+    try {
+      const file = path.join(chatsFolder(), one.cwd.replace(/[^a-zA-Z0-9]/g, '-'), one.sessionId + '.jsonl')
+      const size = fs.statSync(file).size
+      const part = Buffer.alloc(Math.min(size, 4000000))
+      const handle = fs.openSync(file, 'r')
+      fs.readSync(handle, part, 0, part.length, size - part.length)
+      fs.closeSync(handle)
+
+      for (const line of part.toString('utf8').split('\n')) {
+        // A message the person typed: a user entry that is not a tool's answer, a note of the app's or an agent's.
+        if (!line.startsWith('{') || !line.includes('"type":"user"') || line.includes('"tool_result"') || line.includes('"isMeta":true') || line.includes('"isSidechain":true')) {
+          continue
+        }
+
+        const when = /"timestamp":"([^"]+)"/.exec(line)?.[1]
+
+        if (when && Date.parse(when) >= since && !line.includes('<task-notification>') && !line.includes('<system-reminder>\\nCalled')) {
+          prompts += 1
+        }
+      }
+    } catch {
+      // A chat that moved or is being written: left out this time.
+    }
+  }
+  todayKept.at = Date.now()
+  todayKept.said = { chats: chats.length, prompts }
+
+  return todayKept.said
+}
+
+/** A chat's title: the desktop app's own when it has one for this chat. */
+const titleOf = one => String(deskChats().get(one.sessionId)?.title || one.customTitle || one.summary || one.firstPrompt || 'Untitled').slice(0, 140)
+
+const guarded = async run => {
+  try {
+    return (await run()) ?? { isOk: true }
+  } catch (error) {
+    const said = error instanceof Error ? error.message : String(error)
+
+    return {
+      error: /authenticat|oauth|log ?in|api key/i.test(said) ? 'Claude Code is not signed in on this computer.' : said,
+    }
+  }
+}
+
+const handlers = {
+  'state:load': () => ({
+    isDemo: IS_DEMO,
+    projects: state.projects.map(describe),
+    prefs: state.prefs,
+  }),
+  'project:add': async () => {
+    const picked = await dialog.showOpenDialog(win, {
+      title: 'Choose a project folder',
+      properties: ['openDirectory'],
+    })
+    const cwd = picked.filePaths[0]
+
+    if (picked.canceled || !cwd) {
+      return null
+    }
+
+    const existing = state.projects.find(one => one.cwd === cwd)
+
+    if (existing) {
+      return describe(existing)
+    }
+
+    const project = { id: randomUUID(), name: path.basename(cwd), cwd, mode: 'default', sessionId: null }
+    project.isTrusted = await askTrust(cwd)
+    state.projects.push(project)
+    saveState()
+
+    return describe(project)
+  },
+  'project:remove': id => {
+    sessions.get(id)?.reset()
+    sessions.delete(id)
+    state.projects = state.projects.filter(one => one.id !== id)
+    saveState()
+  },
+  'project:transcript': id => (state.projects.some(one => one.id === id) ? readTranscript(id) : []),
+  'project:send': (id, text) => sessionOf(id)?.submit(String(text)),
+  'project:stop': id => sessionOf(id)?.stop(),
+  'project:new': id => sessionOf(id)?.reset(),
+  'project:mode': (id, mode) => (MODES.includes(mode) ? sessionOf(id)?.setMode(mode) : undefined),
+  'project:permission': (id, askId, decision, answers) => sessionOf(id)?.decide(askId, decision, answers),
+  'project:branch': id => {
+    const project = state.projects.find(one => one.id === id)
+
+    return project ? branchOf(project.cwd) : ''
+  },
+  'sessions:list': async id => {
+    const project = state.projects.find(one => one.id === id)
+
+    if (!project) {
+      return []
+    }
+
+    const found = await listSessions({ dir: project.cwd, limit: 80 })
+
+    return found
+      .filter(one => !one.archived && !(deskChats().get(one.sessionId)?.isArchived && one.sessionId !== project.sessionId))
+      .sort((a, b) => b.lastModified - a.lastModified)
+      .map(one => ({
+        id: one.sessionId,
+        title: titleOf(one),
+        lastModified: one.lastModified,
+        size: one.fileSize ?? 0,
+        isCurrent: one.sessionId === project.sessionId,
+      }))
+  },
+  // Opens a saved conversation and continues it, whichever app made it.
+  'sessions:open': async (id, sessionId) => {
+    const project = state.projects.find(one => one.id === id)
+
+    return project ? openSaved(project, String(sessionId)) : null
+  },
+  // A new chat that holds this one up to one of Claude's replies; the first stays as it is.
+  'chats:fork': (id, uuid) =>
+    guarded(async () => {
+      const project = state.projects.find(one => one.id === id)
+
+      if (!project?.sessionId) {
+        return { error: 'There is no saved chat here to fork yet.' }
+      }
+
+      if (sessionOf(id).isBusy) {
+        return { error: 'Claude is still working here. Wait for it or stop it, then fork.' }
+      }
+
+      const upTo = /^[0-9a-f-]{36}$/i.test(String(uuid)) ? { upToMessageId: String(uuid) } : {}
+      const made = await forkSession(project.sessionId, { dir: project.cwd, ...upTo })
+      state.own ??= []
+      state.own.push(made.sessionId)
+      saveState()
+
+      const opened = await openSaved(project, made.sessionId)
+
+      // The window says so in the chat: a fork looks just like the chat it was made from.
+      return opened.error ? opened : { ...opened, forkId: made.sessionId }
+    }),
+  'text:copy': text => {
+    clipboard.writeText(String(text ?? '').slice(0, 400000))
+
+    return true
+  },
+  // Every saved conversation on this computer, newest first, for the Chats tab.
+  'chats:all': async () => {
+    const found = await listSessions({ limit: 5000 })
+    const copies = state.copies ?? {}
+    const hidden = new Set(Object.values(copies))
+    const byId = new Map(found.map(one => [one.sessionId, one]))
+
+    const known = deskChats()
+
+    return found
+      .filter(one => !one.archived && one.cwd && !hidden.has(one.sessionId) && !known.get(one.sessionId)?.isArchived)
+      .map(one => ({
+        id: one.sessionId,
+        title: titleOf(one),
+        cwd: one.cwd,
+        // As the desktop app has it: the project a worktree chat belongs to, and the chat that started this one.
+        group: known.get(one.sessionId)?.folder || one.cwd,
+        parent: known.get(one.sessionId)?.parent ?? '',
+        isDesk: known.has(one.sessionId),
+        prs: known.get(one.sessionId)?.prs ?? [],
+        // Made in this app: it can be archived or deleted from here.
+        isOurs: madeHere(one.sessionId, one.cwd),
+        // A chat continued here shows when it was last touched here.
+        lastModified: Math.max(one.lastModified, byId.get(copies[one.sessionId])?.lastModified ?? 0),
+        size: one.fileSize ?? 0,
+      }))
+      .sort((a, b) => b.lastModified - a.lastModified)
+  },
+  'themes:list': () => listThemes(),
+  'themes:save': raw => guarded(() => saveTheme(raw)),
+  'themes:delete': file => {
+    if (THEME_FILE.test(String(file))) {
+      fs.rmSync(path.join(themesFolder(), file + '.json'), { force: true })
+    }
+
+    return true
+  },
+  // The person picks where a copy of a saved theme goes.
+  'themes:export': file =>
+    guarded(async () => {
+      const theme = listThemes().find(one => one.file === file)
+
+      if (!theme) {
+        return { error: 'That theme is not there any more.' }
+      }
+
+      const picked = await dialog.showSaveDialog(win, { title: 'Export theme', defaultPath: theme.file + '.claamp-theme.json', filters: [{ name: 'Cla-Amp theme', extensions: ['json'] }] })
+
+      if (!picked.canceled && picked.filePath) {
+        const { file: _file, ...plain } = theme
+        fs.writeFileSync(picked.filePath, JSON.stringify(plain, null, 2))
+      }
+
+      return { isOk: !picked.canceled }
+    }),
+  // The person picks a theme file; what it holds is cleaned like any theme, then kept.
+  'themes:import': () =>
+    guarded(async () => {
+      const picked = await dialog.showOpenDialog(win, { title: 'Import theme', properties: ['openFile'], filters: [{ name: 'Cla-Amp theme', extensions: ['json'] }] })
+
+      if (picked.canceled || !picked.filePaths[0]) {
+        return { isOk: false }
+      }
+
+      if (fs.statSync(picked.filePaths[0]).size > 300000) {
+        return { error: 'That file is too large to be a theme.' }
+      }
+
+      let raw
+
+      try {
+        raw = JSON.parse(fs.readFileSync(picked.filePaths[0], 'utf8'))
+      } catch {
+        return { error: 'That file is not a Cla-Amp theme.' }
+      }
+
+      const saved = saveTheme(raw)
+
+      return saved.error ? { error: 'That file is not a Cla-Amp theme.' } : saved
+    }),
+  'today:stats': () => guarded(() => todayStats()),
+  'chats:archive': (sessionId, cwd) => guarded(() => putAway(sessionId, cwd, false)),
+  'chats:delete': (sessionId, cwd) => guarded(() => putAway(sessionId, cwd, true)),
+  // Opens a chat from the Chats tab, adding its folder as a project if it is not one yet.
+  'chats:open': async (sessionId, cwd) => {
+    const id = String(sessionId)
+    let folder = realFolder(cwd)
+
+    // A chat can be working in another folder than the one it is saved for
+    // (a worktree, a subfolder it moved into). The list of working chats
+    // knows only where it is working, so the folder it is saved for is asked
+    // of Claude Code itself.
+    if (/^[0-9a-f-]{36}$/i.test(id) && (folder === null || !(await getSessionInfo(id, { dir: folder }).catch(() => undefined)))) {
+      const saved = await getSessionInfo(id).catch(() => undefined)
+
+      if (saved?.cwd) {
+        folder = realFolder(saved.cwd)
+        cwd = saved.cwd
+      }
+    }
+
+    if (folder === null) {
+      return { error: `The folder ${String(cwd).slice(0, 200)} no longer exists, so this chat cannot be continued.` }
+    }
+
+    // The chat must be saved for that folder before anything is added or asked.
+    if (!/^[0-9a-f-]{36}$/i.test(id) || !(await getSessionInfo(id, { dir: folder }).catch(() => undefined))) {
+      return { error: 'That chat is not saved for this folder any more.' }
+    }
+
+    let project = state.projects.find(one => sameFolder(one.cwd, folder))
+
+    if (!project) {
+      project = { id: randomUUID(), name: path.basename(folder), cwd: folder, mode: 'default', sessionId: null }
+      project.isTrusted = await askTrust(folder)
+      state.projects.push(project)
+      saveState()
+    }
+
+    return openSaved(project, String(sessionId))
+  },
+  // Usage, models and connectors for one project. Its Claude Code process is
+  // started for this if it is not running; other idle ones are put to sleep.
+  'session:info': id => {
+    const session = sessionOf(id)
+
+    if (!session) {
+      return { error: 'That project is no longer in the list.' }
+    }
+
+    for (const other of sessions.values()) {
+      if (other !== session && Date.now() - Math.max(other.touched, other.woke ?? 0) > SLEEP_AFTER) {
+        other.sleep()
+      }
+    }
+
+    return guarded(() => session.info())
+  },
+  'session:usage': id => guarded(async () => (await sessionOf(id)?.usage()) ?? null),
+  'session:commands': id => guarded(async () => (state.projects.some(one => one.id === id) ? ((await sessionOf(id)?.commands()) ?? []) : [])),
+  'session:context': id => guarded(async () => (state.projects.some(one => one.id === id) ? ((await sessionOf(id)?.context()) ?? null) : null)),
+  'session:servers': id => guarded(async () => ({ servers: (await sessionOf(id)?.servers()) ?? [] })),
+  'session:model': (id, value) => guarded(() => sessionOf(id)?.setModel(String(value))),
+  'session:effort': (id, level) =>
+    level === null || EFFORTS.includes(level) ? guarded(() => sessionOf(id)?.setEffort(level)) : undefined,
+  'session:fast': (id, isFast) => guarded(() => sessionOf(id)?.setFast(isFast === true)),
+  'mcp:reconnect': (id, name) => guarded(() => sessionOf(id)?.live().reconnectMcpServer(String(name))),
+  'mcp:toggle': (id, name, isOn) => guarded(() => sessionOf(id)?.live().toggleMcpServer(String(name), isOn === true)),
+  // A connector that needs the person's approval. One from their Claude account
+  // is approved on claude.ai; any other, in Claude Code's own /mcp screen. This
+  // app never sees a password or a token.
+  'mcp:authorize': async (id, isClaudeAi) => {
+    if (isClaudeAi === true) {
+      await shell.openExternal('https://claude.ai/settings/connectors')
+
+      return true
+    }
+
+    const project = state.projects.find(one => one.id === id)
+
+    if (!project) {
+      return false
+    }
+
+    return openClaudeConsole(['/mcp'], project.cwd)
+  },
+  'plugins:list': async () => {
+    const listed = await claudeCli(['plugin', 'list', '--json'])
+
+    try {
+      return JSON.parse(listed.out)
+        .map(one => ({
+          id: String(one.id),
+          name: String(one.id).split('@')[0],
+          from: String(one.id).split('@')[1] ?? '',
+          version: one.version ?? '',
+          scope: one.scope ?? '',
+          isOn: one.enabled === true,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name))
+    } catch {
+      return { error: listed.err.trim() || 'Could not read the plugin list.' }
+    }
+  },
+  // Turns an installed plugin on or off for Claude Code on this computer, then
+  // has the running sessions load the change.
+  'plugins:toggle': async (pluginId, isOn) => {
+    const id = String(pluginId)
+
+    if (!/^[A-Za-z0-9][\w.-]*(@[A-Za-z0-9][\w.-]*)?$/.test(id)) {
+      return { error: 'That is not a plugin name.' }
+    }
+
+    const done = await claudeCli(['plugin', isOn === true ? 'enable' : 'disable', id])
+
+    if (!done.isOk) {
+      return { error: (done.err || done.out).trim().split('\n').pop() || 'The plugin could not be changed.' }
+    }
+
+    for (const session of sessions.values()) {
+      void session.query?.reloadPlugins({ refuseIfBusy: true }).catch(() => {})
+    }
+
+    return { isOk: true }
+  },
+  'skins:list': () => listSkins().map(({ sheet: _sheet, ...skin }) => skin),
+  // The window asks before it loads a skin. A skin of the person's own that
+  // does more than set colours is put to them in a system dialog, once for
+  // each version of its stylesheet.
+  'skins:use': async id => {
+    const skin = listSkins().find(one => one.id === id)
+
+    if (!skin || skin.kind === 'refused') {
+      return { error: skin ? `This skin was not loaded. ${skin.why}` : 'That skin is no longer there.' }
+    }
+
+    if (skin.isOwn && skin.kind === 'full') {
+      const mark = createHash('sha256').update(fs.readFileSync(skin.sheet)).digest('hex')
+      state.skinsAllowed ??= []
+
+      if (!state.skinsAllowed.includes(mark)) {
+        const picked = await dialog.showMessageBox(win, {
+          type: 'warning',
+          title: 'Cla-Amp',
+          message: `Use the skin "${skin.name}"?`,
+          detail:
+            'This skin does more than change colours: it has rules of its own, which can move, cover or hide any part of the window, including the cards that ask your permission. It cannot run a program or reach the internet.\n\nUse it only if you made it or trust who did.',
+          buttons: ['Cancel', 'Use this skin'],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+        })
+
+        if (picked.response !== 1) {
+          return { error: 'The skin was not loaded.' }
+        }
+
+        state.skinsAllowed = [...state.skinsAllowed, mark].slice(-200)
+        saveState()
+      }
+    }
+
+    return { url: skin.url, pictures: skinPictures(skin.sheet) }
+  },
+  // Opens the person's own skins folder, with a starter skin in it the first time.
+  // Makes a Cla-Amp skin from a classic Winamp skin file the person picks.
+  // Only its colours and font carry over, so the result is a colours-only
+  // skin; nothing from inside the file is saved as it is.
+  'skins:import': async () => {
+    const picked = await dialog.showOpenDialog(win, {
+      title: 'Choose a Winamp skin',
+      properties: ['openFile'],
+      filters: [{ name: 'Winamp skin', extensions: ['wsz', 'zip'] }],
+    })
+    const file = picked.filePaths[0]
+
+    if (picked.canceled || !file) {
+      return null
+    }
+
+    try {
+      if (fs.statSync(file).size > 30 * 1024 * 1024) {
+        return { error: 'That file is too large to be a Winamp skin.' }
+      }
+
+      return keepWinampSkin(fs.readFileSync(file), path.basename(file).replace(/\.(wsz|zip)$/i, ''))
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : 'That file could not be read as a Winamp skin.' }
+    }
+  },
+  // The same from a link the person pasted: a skin's page on the Winamp Skin
+  // Museum (skins.webamp.org). Only that site's own file store is fetched
+  // from, over https, and only the skin the link names.
+  'skins:link': async link => {
+    let address = null
+
+    try {
+      address = new URL(typeof link === 'string' ? link.trim() : '')
+    } catch {
+      return { error: 'That is not a link. Copy the address of a skin\'s page on skins.webamp.org.' }
+    }
+    const id = address.pathname.match(/(?:^|\/)([0-9a-f]{32})(?=[./]|$)/i)?.[1]?.toLowerCase()
+
+    if (address.protocol !== 'https:' || !SKIN_SITES.includes(address.hostname) || !id) {
+      return { error: 'Only links to a skin\'s own page on skins.webamp.org can be imported. Open the skin there and copy the address.' }
+    }
+    // The page's address ends with the skin's file name.
+    const parts = address.pathname.split('/').filter(part => part !== '')
+    let name = ''
+
+    try {
+      name = decodeURIComponent(parts[parts.length - 1] ?? '')
+    } catch {
+      name = ''
+    }
+    name = /^[0-9a-f]{32}(\.wsz)?$/i.test(name) ? '' : name.replace(/\.(wsz|zip)$/i, '').replace(/[_]+/g, ' ').trim()
+
+    try {
+      const reply = await fetch(`https://${SKIN_STORE}/skins/${id}.wsz`, { redirect: 'error', signal: AbortSignal.timeout(20000) })
+
+      if (!reply.ok) {
+        return { error: reply.status === 404 ? 'The site has no skin under that link.' : `The site did not send the skin (answer ${reply.status}).` }
+      }
+      if (Number(reply.headers.get('content-length') ?? 0) > 30 * 1024 * 1024) {
+        return { error: 'That file is too large to be a Winamp skin.' }
+      }
+      const bytes = Buffer.from(await reply.arrayBuffer())
+
+      if (bytes.length > 30 * 1024 * 1024) {
+        return { error: 'That file is too large to be a Winamp skin.' }
+      }
+
+      return keepWinampSkin(bytes, name || `Skin ${id.slice(0, 8)}`)
+    } catch (error) {
+      return { error: error?.name === 'TimeoutError' || error?.cause ? 'The skin could not be downloaded. Check the connection and try again.' : error instanceof Error ? error.message : 'That file could not be read as a Winamp skin.' }
+    }
+  },
+  'skins:folder': async () => {
+    const folder = userSkins()
+
+    if (!fs.existsSync(folder)) {
+      fs.mkdirSync(folder, { recursive: true })
+      fs.cpSync(path.join(ROOT, 'skins', '_template'), path.join(folder, 'my-skin'), { recursive: true })
+    }
+
+    return (await shell.openPath(folder)) === ''
+  },
+  'dictate:start': () => startDictation(),
+  'dictate:stop': () => {
+    stopDictation()
+
+    return { isOn: false }
+  },
+  // Which of the person's browsers "Open player" would use.
+  'player:which': async () => ({ browsers: (await findBrowsers()).map(one => one.name), docks: DOCKS }),
+  'player:browser': (wanted, site, isQuiet) => openBrowserPlayer(typeof wanted === 'string' ? wanted : '', site === 'spotify' ? 'spotify' : 'ytm', isQuiet === true),
+  'player:state': () => playerState,
+  // A skin can ask for the window to be glass: the desktop behind it shows
+  // through, blurred by Windows (11, 22H2 or later; elsewhere nothing happens).
+  'window:glass': kind => {
+    const wantsClear = kind === 'clear'
+
+    // Clear glass is a property of the window from its making: remember the
+    // wish for the next start.
+    if (!SHOT && (state.prefs.clearGlass === true) !== wantsClear) {
+      state.prefs.clearGlass = wantsClear
+      saveState()
+    }
+
+    if (wantsClear && isClearWindow) {
+      return true
+    }
+
+    // Not made clear this time: the frosted kind stands in until a restart.
+    const material = wantsClear ? 'acrylic' : ['acrylic', 'mica', 'tabbed'].includes(kind) ? kind : 'none'
+
+    if (win === null || SHOT || isClearWindow || process.platform !== 'win32' || typeof win.setBackgroundMaterial !== 'function') {
+      return false
+    }
+
+    try {
+      win.setBackgroundColor(material === 'none' ? '#0b0c10' : '#00000000')
+      win.setBackgroundMaterial(material)
+    } catch {
+      return false
+    }
+
+    return material !== 'none'
+  },
+  // The Claude.ai button: opens claude.ai docked to this window, brings it
+  // back if it is tucked away, tucks it away if it is on show.
+  'claude:open': async () => {
+    if (!playerState.hasClaude) {
+      return openBrowserPlayer('', 'claude')
+    }
+
+    const isOnShow = state.prefs.playerSite === 'claude' && !playerState.hidden
+    state.prefs.playerSite = 'claude'
+    state.prefs.playerHidden = isOnShow
+    saveState()
+    playerSay('site claude')
+    playerSay(isOnShow ? 'hide' : 'show')
+    placePlayer()
+
+    return { isAuto: true, isShown: !isOnShow }
+  },
+  // A library song's bytes, for the equalizer's player in the window. Only songs the library found.
+  'music:bytes': async file => {
+    if (typeof file !== 'string' || !knownSongs.has(file)) {
+      return null
+    }
+
+    try {
+      const real = file.startsWith('file:') ? fileURLToPath(file) : file
+
+      return (await fs.promises.stat(real)).size > 400 * 1024 * 1024 ? null : await fs.promises.readFile(real)
+    } catch {
+      return null
+    }
+  },
+  'look:get': () => cleanLook(state.look),
+  'look:set': look => {
+    state.look = cleanLook(look)
+    saveState()
+
+    return true
+  },
+  // The person picks a picture; a copy goes into this app's own look folder.
+  'look:picture': async () => {
+    const picked = await dialog.showOpenDialog(win, {
+      title: 'Choose a picture',
+      properties: ['openFile'],
+      filters: [{ name: 'Pictures', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }],
+    })
+    const file = picked.filePaths[0]
+
+    if (picked.canceled || !file) {
+      return null
+    }
+
+    const kind = { '.png': 'png', '.jpg': 'jpg', '.jpeg': 'jpg', '.gif': 'gif', '.webp': 'webp' }[path.extname(file).toLowerCase()]
+
+    if (!kind || fs.statSync(file).size > 40 * 1024 * 1024) {
+      return { error: 'That is not a PNG, JPEG, GIF or WebP picture under 40 MB.' }
+    }
+
+    const bytes = fs.readFileSync(file)
+    const copy = path.join(lookFolder(), `${createHash('sha1').update(bytes).digest('hex')}.${kind}`)
+    fs.mkdirSync(lookFolder(), { recursive: true })
+    fs.writeFileSync(copy, bytes)
+
+    return { url: pathToFileURL(copy).href }
+  },
+  'about:info': () => aboutInfo(),
+  // The Settings page: the account, and what each of Claude Code's settings files sets. Read only.
+  'settings:read': async id => {
+    const project = state.projects.find(one => one.id === id)
+
+    return {
+      account: await accountInfo(),
+      files: settingsFiles(project).map(one => {
+        const exists = fs.existsSync(one.file)
+
+        return { ...one, exists, summary: exists ? summarizeSettings(one.file) : null }
+      }),
+    }
+  },
+  'settings:open': async (which, id) => {
+    const project = state.projects.find(one => one.id === id)
+    const target = which === 'data' ? dataDir() : settingsFiles(project).find(one => one.which === which)?.file
+
+    return Boolean(target) && fs.existsSync(target) && (await shell.openPath(target)) === ''
+  },
+  'settings:web': () => {
+    void shell.openExternal('https://claude.ai/settings')
+
+    return true
+  },
+  // The text of one of this app's own guides, for the Guides page in the window.
+  'docs:read': name => {
+    const file =
+      name === 'readme' ? path.join(ROOT, 'README.md')
+      : ['user-guide', 'skins', 'privacy', 'security', 'code-guide'].includes(name) ? path.join(ROOT, 'docs', `${name}.md`)
+      : null
+
+    try {
+      return file === null ? null : fs.readFileSync(file, 'utf8').slice(0, 400000)
+    } catch {
+      return null
+    }
+  },
+  // Opens one of this app's own guides, or the folder they are in.
+  'docs:open': async name => {
+    const target = name === 'folder' ? path.join(ROOT, 'docs') : ['skins', 'security', 'code-guide'].includes(name) ? path.join(ROOT, 'docs', `${name}.md`) : null
+
+    return target !== null && (await shell.openPath(target)) === ''
+  },
+  'outside:state': () => (IS_DEMO ? { chats: 0, agents: 0, list: [] } : watchOutside()),
+  // Tucks the player's window away (the music plays on) or brings it back.
+  'player:hide': (isHidden, site) => {
+    state.prefs.playerHidden = isHidden === true
+
+    // The deck says which player it is on: that one's window is the one shown.
+    if (site === 'ytm' || site === 'spotify') {
+      state.prefs.playerSite = site
+      playerSay(`site ${site}`)
+      placePlayer()
+      tellBrowserSite()
+    }
+    saveState()
+    playerSay(isHidden === true ? 'hide' : 'show')
+
+    return true
+  },
+  // Starts the Spotify app through Windows; the address is fixed.
+  'spotify:open': () => {
+    void shell.openExternal('spotify:')
+
+    return true
+  },
+  // Reads the window's own page again, to pick up changed window code. The
+  // page cannot do this itself: it is not allowed to navigate anywhere.
+  'app:reload': () => {
+    win?.webContents.reload()
+
+    return true
+  },
+  // Closes the app and opens it again, to pick up changed app code.
+  'app:restart': () => {
+    let isGone = false
+    const go = () => {
+      if (!isGone) {
+        isGone = true
+        playerHelper?.kill()
+        app.relaunch()
+        app.quit()
+      }
+    }
+
+    // The player is let go first, so the music plays on; the new run takes it back.
+    if (playerHelper === null) {
+      go()
+    } else {
+      isRestarting = true
+      playerHelper.once('exit', go)
+      playerSay('release')
+      setTimeout(go, 2500)
+    }
+
+    return true
+  },
+  'auth:status': () => authStatus(),
+  // Opens Claude Code's own sign-in in a console window: it sends the person
+  // to their browser, and this app never sees a password or a token.
+  'auth:login': async () => {
+    return openClaudeConsole(['auth', 'login'], dataDir())
+  },
+  'queue:remove': (id, index) => {
+    const session = sessionOf(id)
+
+    if (session) {
+      session.queue.splice(index, 1)
+      session.setStatus(session.status)
+    }
+  },
+  win: action => {
+    if (action === 'minimize') {
+      win.minimize()
+    } else if (action === 'maximize') {
+      if (dockedFrom !== null) {
+        // Sharing the screen with the player counts as maximised: this puts it back.
+        const back = dockedFrom
+        dockedFrom = null
+        win.setBounds(back)
+      } else if (win.isMaximized()) {
+        win.unmaximize()
+      } else {
+        win.maximize()
+      }
+    } else if (action === 'close') {
+      win.close()
+    }
+  },
+  'pick:video': async () => {
+    const picked = await dialog.showOpenDialog(win, {
+      title: 'Choose a video',
+      properties: ['openFile'],
+      filters: [{ name: 'Video', extensions: ['mp4', 'webm', 'mkv', 'mov', 'm4v', 'ogv'] }],
+    })
+    const file = picked.filePaths[0]
+
+    return picked.canceled || !file ? null : { url: pathToFileURL(file).href, name: path.basename(file) }
+  },
+  // Which of the file names found in a reply are videos that exist: each as an
+  // address the floating player can play. A name without a folder is looked
+  // for in the project's folder.
+  'video:find': (id, names) => {
+    const project = state.projects.find(one => one.id === id)
+    const found = []
+
+    for (const name of Array.isArray(names) ? names.slice(0, 8) : []) {
+      if (typeof name !== 'string' || name.length > 600 || !/\.(mp4|webm|mkv|mov|m4v|ogv)$/i.test(name)) {
+        continue
+      }
+
+      try {
+        const file = path.isAbsolute(name) ? path.normalize(name) : project ? path.resolve(project.cwd, name) : null
+
+        if (file !== null && fs.statSync(file).isFile() && !found.some(one => one.file === file)) {
+          found.push({ file, url: pathToFileURL(file).href, name: path.basename(file) })
+        }
+      } catch {
+        // Not there: no button for it.
+      }
+    }
+
+    return found.slice(0, 4).map(({ url, name }) => ({ url, name }))
+  },
+  'music:scan': () => scanSongs(),
+  // Adds a folder of music, picked in a system dialog.
+  'music:add': async () => {
+    const picked = await dialog.showOpenDialog(win, {
+      title: 'Add a music folder',
+      properties: ['openDirectory'],
+    })
+    const folder = picked.filePaths[0]
+
+    if (picked.canceled || !folder) {
+      return null
+    }
+
+    const folders = musicFolders()
+
+    if (!folders.some(one => sameFolder(one, folder))) {
+      state.prefs.musicFolders = [...folders, folder]
+      saveState()
+    }
+
+    return scanSongs()
+  },
+  'music:remove': folder => {
+    state.prefs.musicFolders = musicFolders().filter(one => one !== folder)
+    saveState()
+
+    return scanSongs()
+  },
+  // The cover of a song this app listed: from inside the file, else from its folder.
+  'music:cover': file => {
+    if (typeof file !== 'string' || !knownSongs.has(file)) {
+      return null
+    }
+
+    const cover = readCover(file)
+
+    return cover ? { url: `data:${cover.mime};base64,${cover.data.toString('base64')}`, from: cover.from, name: cover.name } : null
+  },
+  // Reads a playlist file the person picks; its songs may then be played.
+  'music:playlist': async () => {
+    const picked = await dialog.showOpenDialog(win, {
+      title: 'Import a playlist',
+      properties: ['openFile'],
+      filters: [{ name: 'Playlist', extensions: ['m3u', 'm3u8', 'pls'] }],
+    })
+    const file = picked.filePaths[0]
+
+    if (picked.canceled || !file) {
+      return null
+    }
+
+    try {
+      tagCache ??= {}
+      const files = readPlaylist(file)
+        .map(one => describeSong(one, tagCache))
+        .filter(Boolean)
+
+      for (const song of files) {
+        knownSongs.add(song.path)
+      }
+
+      return { name: path.basename(file).replace(/\.[^.]+$/, ''), files }
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : 'That playlist could not be read.' }
+    }
+  },
+  // The music helper takes a fixed set of commands. A song is one this app
+  // found in the music folder, never a path or an address the page made up.
+  'deck:cmd': (command, argument) => {
+    const text = String(argument ?? '')
+
+    if (command === 'open') {
+      return knownSongs.has(text) ? deckCommand('open', text) : 0
+    }
+
+    if (['pause', 'resume', 'stop', 'hush', 'web-toggle', 'web-next', 'web-prev'].includes(command)) {
+      return deckCommand(command)
+    }
+
+    if (command === 'web-app' && ['spotify', 'other'].includes(text)) {
+      return deckCommand(command, text)
+    }
+
+    if (command === 'view-app' && ['spotify', 'other', 'none'].includes(text)) {
+      return deckCommand(command, text)
+    }
+
+    if (['seek', 'web-seek', 'vol', 'web-vol'].includes(command) && /^\d{1,7}(\.\d{1,3})?$/.test(text)) {
+      return deckCommand(command, text)
+    }
+
+    return 0
+  },
+  // Only the preferences the window is known to keep, each checked for shape.
+  'prefs:set': (key, value) => {
+    const checks = {
+      volume: one => typeof one === 'number' && one >= 0 && one <= 1,
+      skin: one => typeof one === 'string' && one.length < 80,
+      pins: one => Array.isArray(one) && one.length < 2000 && one.every(id => typeof id === 'string' && id.length < 80),
+    }
+
+    if (Object.hasOwn(checks, key) && checks[key](value)) {
+      state.prefs[key] = value
+      saveState()
+    }
+  },
+}
+
+// --------------------------------------------------------------------- window
+
+/**
+ * Opens a web link from the chat in the person's browser. Only plain web
+ * addresses: never a file, a script, or another program's own link type,
+ * which is how a link in a reply could otherwise start something.
+ */
+const openLink = raw => {
+  let url = null
+
+  try {
+    url = new URL(String(raw))
+  } catch {
+    return
+  }
+
+  if ((url.protocol === 'https:' || url.protocol === 'http:') && url.username === '' && url.password === '') {
+    void shell.openExternal(url.href)
+  }
+}
+
+// ------------------------------------------------------- YouTube Music player
+
+const PLAYER_HOME = 'https://music.youtube.com/'
+
+/**
+ * The person's own browser, for opening YouTube Music as an "app window": a
+ * window with no tabs or address bar that belongs to the browser and so is
+ * already signed in to whatever the person is signed in to there. Cla-Amp
+ * never sees, copies or stores that sign-in; it only starts the browser.
+ *
+ * Only Chrome, Edge and Brave are looked for, and only in the folders their
+ * installers use, so nothing else can be started by this. The default
+ * browser goes first when it is one of them.
+ */
+const BROWSERS = [
+  { name: 'Chrome', id: /chrome/i, paths: [['ProgramFiles', 'Google/Chrome/Application/chrome.exe'], ['ProgramFiles(x86)', 'Google/Chrome/Application/chrome.exe'], ['LOCALAPPDATA', 'Google/Chrome/Application/chrome.exe']] },
+  { name: 'Edge', id: /edge/i, paths: [['ProgramFiles(x86)', 'Microsoft/Edge/Application/msedge.exe'], ['ProgramFiles', 'Microsoft/Edge/Application/msedge.exe']] },
+  { name: 'Brave', id: /brave/i, paths: [['ProgramFiles', 'BraveSoftware/Brave-Browser/Application/brave.exe'], ['LOCALAPPDATA', 'BraveSoftware/Brave-Browser/Application/brave.exe']] },
+]
+
+const defaultBrowserId = () =>
+  new Promise(resolve => {
+    if (process.platform !== 'win32') {
+      resolve('')
+
+      return
+    }
+
+    execFile(
+      path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'reg.exe'),
+      ['query', 'HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice', '/v', 'ProgId'],
+      { windowsHide: true, timeout: 5000 },
+      (_error, out) => resolve(/ProgId\s+REG_SZ\s+(\S+)/.exec(String(out ?? ''))?.[1] ?? ''),
+    )
+  })
+
+/** The browsers found on this computer, the default one first. */
+const findBrowsers = async () => {
+  const usual = await defaultBrowserId()
+  const order = [...BROWSERS.filter(one => one.id.test(usual)), ...BROWSERS.filter(one => !one.id.test(usual))]
+  const found = []
+
+  for (const browser of order) {
+    for (const [base, rest] of browser.paths) {
+      const file = process.env[base] ? path.join(process.env[base], rest) : ''
+
+      if (file && fs.existsSync(file)) {
+        found.push({ name: browser.name, file })
+        break
+      }
+    }
+  }
+
+  return found
+}
+
+/**
+ * Browsers whose player window gets a profile of its own and is docked to
+ * this window. Any other browser opens the player as an ordinary window.
+ */
+const DOCKS = ['Edge', 'Brave']
+// Liked Songs. Signed out, Spotify shows its own sign-in page first.
+const SPOTIFY_HOME = 'https://open.spotify.com/collection/tracks'
+const CLAUDE_HOME = 'https://claude.ai/'
+
+/**
+ * Opens a player (or claude.ai) in the browser asked for by name, else in
+ * the first one found. In a browser that can be docked, the window gets a
+ * browser profile of its own, kept in this app's data folder and read and
+ * written by the browser only. The person signs in there themselves, in the
+ * real browser. Nothing is added to the browser and nothing on its pages is
+ * read or changed: what is playing comes from Windows' own media controls.
+ */
+const openBrowserPlayer = async (wanted, site = 'ytm', isQuiet = false) => {
+  const found = await findBrowsers()
+  // claude.ai goes to a browser that can be docked, when there is one.
+  const browser = (site === 'claude' ? found.find(one => DOCKS.includes(one.name)) : found.find(one => one.name === wanted)) ?? found[0]
+
+  if (!browser) {
+    return { error: 'No Chrome, Edge or Brave was found.' }
+  }
+
+  const isAuto = DOCKS.includes(browser.name)
+  const home = site === 'claude' ? CLAUDE_HOME : site === 'spotify' ? SPOTIFY_HOME : PLAYER_HOME
+
+  // Every part of the command is fixed here or is one of this app's own folders.
+  const child = spawn(
+    browser.file,
+    [
+      ...(isAuto
+        ? [
+            '--user-data-dir=' + playerProfile(),
+            // The player keeps running at full speed while hidden or covered.
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-renderer-backgrounding',
+            '--no-first-run',
+            // Nothing of the player lives on in the background once its windows are closed.
+            '--disable-background-mode',
+            '--no-default-browser-check',
+          ]
+        : []),
+      '--app=' + home,
+    ],
+    { detached: true, stdio: 'ignore' },
+  )
+  child.on('error', () => {})
+  child.unref()
+
+  if (isAuto) {
+    state.prefs.playerSite = site
+    saveState()
+    startPlayerHelper()
+
+    // Opened by hand: the window is wanted on show. Opened by pressing play: it stays as it was left.
+    if (!isQuiet && state.prefs.playerHidden === true) {
+      state.prefs.playerHidden = false
+      saveState()
+      playerSay('show')
+    }
+    playerSay(`site ${site}`)
+    playerSay('find')
+    placePlayer()
+    tellBrowserSite()
+  }
+
+  return { browser: browser.name, isAuto }
+}
+
+/** True when a call comes from this app's own page, not from anything else a window might hold. */
+const isOurPage = event => {
+  const frame = event.senderFrame
+
+  return (
+    win !== null &&
+    event.sender === win.webContents &&
+    frame !== null &&
+    frame === win.webContents.mainFrame &&
+    frame.url.startsWith(pathToFileURL(path.join(ROOT, 'renderer', 'index.html')).href)
+  )
+}
+
+const createWindow = () => {
+  isClearWindow = !SHOT && process.platform === 'win32' && state.prefs.clearGlass === true
+
+  win = new BrowserWindow({
+    // Clear glass (a skin's --window-glass: clear): nothing is drawn behind the page.
+    transparent: isClearWindow,
+    width: 1320,
+    height: SHOT ? numberArg('height', 880) : 880,
+    minWidth: 940,
+    minHeight: 600,
+    frame: false,
+    show: !SHOT,
+    backgroundColor: isClearWindow ? '#00000000' : '#0b0c10',
+    title: 'Cla-Amp',
+    // The window's and the taskbar's icon.
+    icon: path.join(ROOT, 'renderer', 'brand', 'icon.ico'),
+    webPreferences: {
+      preload: path.join(ROOT, 'preload.cjs'),
+      contextIsolation: true,
+      // The equalizer's player starts the next song by itself.
+      autoplayPolicy: 'no-user-gesture-required',
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      webviewTag: false,
+      devTools: IS_DEV,
+    },
+  })
+  win.setMenu(null)
+
+  for (const moved of ['move', 'resize', 'restore', 'maximize', 'unmaximize', 'show']) {
+    win.on(moved, placePlayer)
+  }
+  // Maximised, or dragged too wide: Cla-Amp stops where the player begins.
+  win.on('maximize', makeRoom)
+
+  for (const done of ['resized', 'moved']) {
+    win.on(done, () => {
+      // Moved or sized by hand since it made room: it is an ordinary window again.
+      if (dockedFrom !== null && !isFitting) {
+        const now = win.getBounds()
+        const area = screen.getDisplayMatching(now).workArea
+
+        if (now.x !== area.x || now.y !== area.y || now.height !== area.height) {
+          dockedFrom = null
+        }
+      }
+      makeRoom()
+    })
+  }
+  // Closing Cla-Amp closes the player with it (a restart lets it play on).
+  win.on('close', event => {
+    // Work that was started from here stops when the window closes: ask first.
+    const busy = [...sessions.values()].filter(one => one.isBusy || one.agentCount > 0 || one.queue.length > 0)
+
+    if (busy.length > 0 && !isCloseAgreed) {
+      const names = busy.map(one => one.project.name).slice(0, 6).join(', ')
+      const picked = dialog.showMessageBoxSync(win, {
+        type: 'warning',
+        title: 'Cla-Amp',
+        message: `Claude is still working in ${busy.length === 1 ? names : `${busy.length} projects (${names})`}.`,
+        detail: `${isRestarting ? 'Restarting' : 'Closing'} Cla-Amp stops that work and drops any messages still waiting in the queue. The chats themselves stay saved.\n\nWork running in the Claude desktop app or a terminal is not touched.`,
+        buttons: ['Keep Cla-Amp open', isRestarting ? 'Restart anyway' : 'Close anyway'],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+      })
+
+      if (picked !== 1) {
+        event.preventDefault()
+        isRestarting = false
+
+        return
+      }
+      isCloseAgreed = true
+    }
+
+    if (!isRestarting) {
+      playerSay('close')
+    }
+  })
+  // The page asks for no camera, microphone, location or anything else.
+  win.webContents.session.setPermissionRequestHandler((_contents, permission, answer) =>
+    answer(permission === 'clipboard-sanitized-write'),
+  )
+  win.webContents.session.setPermissionCheckHandler((_contents, permission) => permission === 'clipboard-sanitized-write')
+  win.webContents.on('will-attach-webview', event => event.preventDefault())
+  win.webContents.on('will-redirect', event => event.preventDefault())
+  // Links open in the person's browser; the window itself never leaves the app.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openLink(url)
+
+    return { action: 'deny' }
+  })
+  win.webContents.on('will-navigate', event => event.preventDefault())
+  void win.loadFile(path.join(ROOT, 'renderer', 'index.html'), IS_DEMO ? { query: { demo: '1' } } : {})
+
+  if (SHOT) {
+    win.webContents.on('console-message', (_event, level, text) => {
+      if (level >= 2) {
+        console.error('[window]', text)
+      }
+    })
+    win.webContents.once('did-finish-load', () => {
+      // A test may hand the page a script to run halfway through the wait.
+      const steps = process.argv.find(arg => arg.startsWith('--do='))?.slice(5)
+
+      if (steps) {
+        setTimeout(() => {
+          void win.webContents
+            .executeJavaScript(fs.readFileSync(path.resolve(steps), 'utf8'))
+            .then(said => console.log('[steps]', JSON.stringify(said)))
+            .catch(error => console.error('[steps failed]', error.message))
+        }, numberArg('wait', 2500) / 2)
+      }
+
+      setTimeout(async () => {
+        const image = await win.webContents.capturePage()
+        fs.writeFileSync(path.resolve(SHOT), image.toPNG())
+        app.quit()
+      }, numberArg('wait', 2500))
+    })
+  }
+
+  win.on('closed', () => {
+    win = null
+    stopDictation()
+  })
+}
+
+// One Cla-Amp at a time: two would write over each other's saved state.
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+}
+app.on('second-instance', () => {
+  if (win !== null) {
+    if (win.isMinimized()) {
+      win.restore()
+    }
+    win.focus()
+  }
+})
+// No window this app did not make, and no page but its own.
+app.on('web-contents-created', (_event, contents) => {
+  contents.on('will-navigate', event => event.preventDefault())
+  contents.setWindowOpenHandler(({ url }) => {
+    openLink(url)
+
+    return { action: 'deny' }
+  })
+})
+
+void app.whenReady().then(() => {
+  if (!app.hasSingleInstanceLock()) {
+    return
+  }
+
+  loadState()
+
+  // Folders added before the trust question existed were the owner's own picks.
+  for (const project of state.projects) {
+    project.isTrusted ??= true
+  }
+
+  // A chat with no model or effort chosen here starts on the desktop app's.
+  for (const project of state.projects) {
+    if (project.sessionId && !project.model && !project.effort) {
+      followDesktop(project, project.sessionId)
+    }
+  }
+
+  for (const [name, handler] of Object.entries(handlers)) {
+    ipcMain.handle(name, (event, ...args) => {
+      if (!isOurPage(event)) {
+        throw new Error('Refused: the call did not come from the Cla-Amp window.')
+      }
+
+      // Test switch CLAAMP_TIME=1: every call that takes over 150 ms is printed with its time.
+      if (process.env.CLAAMP_TIME === '1') {
+        const start = performance.now()
+
+        return Promise.resolve(handler(...args)).finally(() => {
+          const took = Math.round(performance.now() - start)
+
+          if (took > 150) {
+            console.log(`[time] ${name} ${took} ms`)
+          }
+        })
+      }
+
+      return handler(...args)
+    })
+  }
+
+  // The same switch prints every stretch over 200 ms in which the app could not answer.
+  if (process.env.CLAAMP_TIME === '1') {
+    let last = performance.now()
+    setInterval(() => {
+      const now = performance.now()
+
+      if (now - last > 300) {
+        console.log(`[time] app busy for ${Math.round(now - last - 100)} ms`)
+      }
+      last = now
+    }, 100)
+  }
+  // Nothing in this app loads from the network, so nothing may.
+  webSession.defaultSession.webRequest.onBeforeRequest((details, answer) => {
+    answer({ cancel: !/^(file|devtools|data|blob):/i.test(details.url) })
+  })
+  createWindow()
+
+  // An earlier version had a built-in YouTube Music window with its own sign-in; wipe what it kept.
+  fs.rm(path.join(dataDir(), 'Partitions', 'youtube-music'), { recursive: true, force: true }, () => {})
+  watchForUpdates()
+
+  if (!IS_DEMO) {
+    startDeck()
+    // Takes back a player left open over a restart.
+    win.once('ready-to-show', startPlayerHelper)
+    win.once('ready-to-show', startTray)
+    setTimeout(startPlayerHelper, 3000)
+
+    setInterval(() => void watchChats().catch(() => {}), WATCH_EVERY)
+    setInterval(() => {
+      try {
+        watchOutside()
+      } catch {
+        // A folder that cannot be read just means no count from it.
+      }
+    }, 4000)
+  }
+})
+
+app.on('window-all-closed', () => app.quit())
+app.on('before-quit', () => {
+  stopDictation()
+  deck?.kill()
+  // The helper closes the player when its input ends.
+  playerHelper?.stdin.end()
+  tray?.destroy()
+  tray = null
+
+  for (const session of sessions.values()) {
+    void session.query?.return?.().catch(() => {})
+  }
+})
