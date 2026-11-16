@@ -231,7 +231,7 @@ set and the app runs from its source folder.
 
 ## Reporting a problem
 
-Open an issue on the project's GitHub page with what you did and what happened. For a security problem, use the repository's private "Report a vulnerability" form instead of a public issue.
+Open an issue on the project's GitHub page with what you did and what happened. Issues are public, so for a security problem say only that you have one to report and leave out the details of how to use it.
 
 Cla-Amp is shared as it is, with no promise of support.
 

@@ -177,9 +177,8 @@ They are the author's reading, not permissions given by those companies:
 
 If you own or speak for any of these products, or for anything else you find
 here, and you want something changed or removed, please open an issue on this
-project's Issues page (or use the repository's private "Report a
-vulnerability" form if it should not be public). It will be changed or
-removed promptly; no formal notice is needed.
+project's Issues page. It will be changed or removed promptly; no formal
+notice is needed.
 
 ## Credits
 
