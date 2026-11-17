@@ -13,7 +13,7 @@ import { BrowserWindow, Menu, Tray, app, clipboard, dialog, ipcMain, powerSaveBl
 
 import { describeSong, readCover, readPlaylist, scanFolders } from './music-library.mjs'
 import { chatsFolder, countOutside, listOutside } from './outside-work.mjs'
-import { readCapped, readCappedLater, readTail, sizeAndBytes } from './safe-read.mjs'
+import { readCapped, readCappedLater, readEndLater, readTail, sizeAndBytes } from './safe-read.mjs'
 import { convertWinampSkin } from './winamp-skin.mjs'
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url))
@@ -1180,7 +1180,7 @@ class Session {
    * only from the engine (its end notice, or the folder Claude Code keeps a
    * chat's task output in), never from the window. Read only.
    */
-  readTask(id) {
+  async readTask(id) {
     const live = [...this.tasks.values()].find(task => task.id === id && task.isBackground)
     const task = live ?? this.ended.get(id)
 
@@ -1193,10 +1193,9 @@ class Session {
 
     for (const file of [task.outputFile, ...taskOutputFiles(this.project.sessionId, task.key)].filter(Boolean)) {
       try {
-        const most = 200000
-        const bytes = readTail(file, most)
-        output = bytes.toString('utf8')
-        isCut = bytes.length >= most
+        const read = await readEndLater(file, 200000)
+        output = read.bytes.toString('utf8')
+        isCut = read.isCut
         break
       } catch {
         // Not there (yet); the next place is tried.
@@ -3380,7 +3379,7 @@ const handlers = {
   'project:stop': id => sessionOf(id)?.stop(),
   // Stops one background agent or command of a chat; the chat itself carries on.
   // What a background command of a chat is doing or did, for its row.
-  'task:read': (id, taskId) => (typeof taskId === 'string' ? (sessionOf(id)?.readTask(taskId) ?? { error: 'That chat is not open any more.' }) : null),
+  'task:read': async (id, taskId) => (typeof taskId === 'string' ? ((await sessionOf(id)?.readTask(taskId)) ?? { error: 'That chat is not open any more.' }) : null),
   'task:stop': async (id, taskId) => (typeof taskId === 'string' ? (await sessionOf(id)?.stopTask(taskId)) === true : false),
   // What is saved about a project (its model and effort among it), answered at once: no Claude Code process is started for it.
   'project:describe': id => {

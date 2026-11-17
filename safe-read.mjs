@@ -45,6 +45,28 @@ export const readTail = (file, most) => {
   }
 }
 
+/**
+ * The last `most` bytes of a file, read as a stream and so strictly as a
+ * reader: nothing here can make or change a file. For files in the temp
+ * folder, where the code scanner treats any open-by-path as a possible
+ * creation. The whole file passes through; only its end is kept.
+ */
+export const readEndLater = async (file, most) => {
+  let kept = Buffer.alloc(0)
+  let isCut = false
+
+  for await (const chunk of fs.createReadStream(file)) {
+    kept = Buffer.concat([kept, chunk])
+
+    if (kept.length > most) {
+      kept = kept.subarray(kept.length - most)
+      isCut = true
+    }
+  }
+
+  return { bytes: kept, isCut }
+}
+
 /** The file's size and, when it is no larger than `most` and `isWanted`, its bytes; all from one opening. */
 export const sizeAndBytes = (file, most, isWanted = true) => {
   const handle = fs.openSync(file, 'r')

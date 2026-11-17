@@ -5,7 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 
-import { readCapped, readCappedLater, readTail, sizeAndBytes } from '../safe-read.mjs'
+import { readCapped, readCappedLater, readEndLater, readTail, sizeAndBytes } from '../safe-read.mjs'
 
 const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'claamp-safe-read-'))
 const file = path.join(folder, 'ten.txt')
@@ -28,6 +28,16 @@ test('readCappedLater does the same', async () => {
 test('readTail gives the end of a long file and all of a short one', () => {
   assert.equal(readTail(file, 4).toString(), '6789')
   assert.equal(readTail(file, 100).toString(), '0123456789')
+})
+
+test('readEndLater gives the end of a long file, all of a short one, and fails on a missing one', async () => {
+  const end = await readEndLater(file, 4)
+  assert.equal(end.bytes.toString(), '6789')
+  assert.equal(end.isCut, true)
+  const all = await readEndLater(file, 100)
+  assert.equal(all.bytes.toString(), '0123456789')
+  assert.equal(all.isCut, false)
+  await assert.rejects(readEndLater(path.join(folder, 'missing'), 10))
 })
 
 test('sizeAndBytes gives the size always and the bytes only when wanted and small enough', () => {
