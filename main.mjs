@@ -1,6 +1,6 @@
 // Cla-Amp's main process: the window, the saved state, one Claude Code
 // session per project (through the Agent SDK), and the audio deck helper.
-import { execFile, spawn } from 'node:child_process'
+import { execFile, spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -233,8 +233,19 @@ const shapeUsage = usage => {
   add('Week, Opus', limits.seven_day_opus?.utilization, limits.seven_day_opus?.resets_at)
   add('Week, Sonnet', limits.seven_day_sonnet?.utilization, limits.seven_day_sonnet?.resets_at)
 
-  if (limits.extra_usage?.is_enabled) {
-    add('Extra usage', limits.extra_usage.utilization, null, true)
+  // Extra usage: credits bought on top of the plan. The row shows when the
+  // account has it switched on, or has an amount to report. Amounts come in
+  // the currency's small unit (cents) and are passed on as they are.
+  const extra = limits.extra_usage
+  const amount = value => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null)
+  const spent = amount(extra?.used_credits)
+  const cap = amount(extra?.monthly_limit)
+
+  if (extra?.is_enabled || spent !== null || cap !== null) {
+    const share = typeof extra.utilization === 'number' ? extra.utilization : spent !== null && cap !== null && cap > 0 ? (spent / cap) * 100 : null
+    add('Extra usage credits', share, null, true)
+    const row = rows.find(one => one.label === 'Extra usage credits')
+    row.money = { used: spent, limit: cap, currency: typeof extra.currency === 'string' && /^[A-Za-z]{3}$/.test(extra.currency) ? extra.currency.toUpperCase() : 'USD', isOn: extra.is_enabled === true }
   }
 
   return { isAvailable: true, plan: usage.subscription_type ?? null, rows }
@@ -4380,6 +4391,24 @@ const openBrowserPlayer = async (wanted, site = 'ytm', isQuiet = false, address 
   // A claude.ai link from a chat opens on its own address; it has been read as an address by the caller.
   const home = site === 'claude' ? (address ?? CLAUDE_HOME) : site === 'spotify' ? SPOTIFY_HOME : PLAYER_HOME
 
+  // One window per music player. When this player's window is already open,
+  // tucked away or not, it is brought out; a second one is never started.
+  // (Should two come to be all the same, the helper closes the newcomer.)
+  if (isAuto && (site === 'ytm' || site === 'spotify') && playerHelper !== null && playerSites.includes(site)) {
+    state.prefs.playerSite = site
+
+    if (!isQuiet) {
+      state.prefs.playerHidden = false
+      playerSay('show')
+    }
+    saveState()
+    playerSay(`site ${site}`)
+    placePlayer()
+    tellBrowserSite()
+
+    return { browser: browser.name, isAuto }
+  }
+
   // Every part of the command is fixed here or is one of this app's own folders.
   const child = spawn(
     browser.file,
@@ -4590,6 +4619,7 @@ const createWindow = () => {
 
     if (!isRestarting) {
       playerSay('close')
+      closeOwnBrowsers()
     }
   })
   // The page asks for no camera, microphone, location or anything else.
@@ -4754,11 +4784,49 @@ void app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => app.quit())
+/**
+ * Stops every browser of Cla-Amp's own, with all its processes, so nothing
+ * of Cla-Amp's plays on or shows in Task Manager once Cla-Amp is closed.
+ * Only browsers started with this app's own profile folders are looked for;
+ * the person's everyday browser is never one of them. A restart keeps the
+ * player playing, so it is left alone then.
+ *
+ * It is done here and waited for, before the app goes: a helper left to do
+ * it afterwards did not outlive the app (measured: it never ran). It takes
+ * a second or two, with the window already out of sight.
+ */
+let areBrowsersClosed = false
+
+const closeOwnBrowsers = () => {
+  if (areBrowsersClosed || isRestarting || IS_DEMO || SHOT || process.platform !== 'win32') {
+    return
+  }
+  areBrowsersClosed = true
+
+  try {
+    win?.hide()
+    spawnSync(
+      path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      ['-NoProfile', '-Command', '& ([scriptblock]::Create([IO.File]::ReadAllText($env:CA_SCRIPT)))'],
+      {
+        env: { ...process.env, CA_SCRIPT: path.join(ROOT, 'deck', 'close-browsers.ps1'), CA_PROFILE: playerProfile(), CA_PAGES: pagesProfile(), CA_LOG: path.join(dataDir(), 'last-close.log') },
+        windowsHide: true,
+        stdio: 'ignore',
+        timeout: 12000,
+      },
+    )
+  } catch {
+    // Nothing to close them with: they stay, as before.
+  }
+}
+
 app.on('before-quit', () => {
   stopDictation()
   deck?.kill()
   // The helper closes the player when its input ends.
   playerHelper?.stdin.end()
+
+  closeOwnBrowsers()
   tray?.destroy()
   tray = null
 

@@ -61,7 +61,7 @@ public static class PlayerWin {
   static void Pixels() { try { SetThreadDpiAwarenessContext((IntPtr)(-4)); } catch { } }
 
   // The browser windows of one process: on show, or ones this helper hid.
-  public static List<long> Windows(uint processId, long[] known, bool tabsToo) {
+  public static List<long> Windows(uint processId, long[] known, bool tabsToo, bool hiddenToo) {
     var found = new List<long>();
     var mine = new HashSet<long>(known);
     EnumWindows((window, extra) => {
@@ -80,7 +80,9 @@ public static class PlayerWin {
       GetWindowText(window, title, 300);
       string shown = title.ToString();
       if (!tabsToo && shown.Contains(" - ") && (shown.EndsWith("Edge") || shown.EndsWith("Brave") || shown.EndsWith("Chrome"))) { return true; }
-      if (IsWindowVisible(window) || mine.Contains(window.ToInt64())) { found.Add(window.ToInt64()); }
+      // A window that is not on show counts when it is one of ours already, or
+      // (hiddenToo) while a browser left running is being taken back at the start.
+      if (IsWindowVisible(window) || hiddenToo || mine.Contains(window.ToInt64())) { found.Add(window.ToInt64()); }
       return true;
     }, IntPtr.Zero);
     return found;
@@ -152,7 +154,7 @@ $owner = [long]$env:CA_OWNER
 # site: the player wanted on show; sites: which player each window is; shown: how things were last arranged.
 # pages: process id of Cla-Amp's browser; pageWins: its windows.
 # baseWidth: how wide the window on show was after it was last put in place (0: not looked at yet).
-$s = @{ baseWidth = 0; pages = 0; pageWins = @(); browser = 0; windows = @(); hidden = $false; rect = $null; lookUntil = [DateTime]::MinValue; said = ''; site = 'ytm'; sites = @{}; shown = '' }
+$s = @{ baseWidth = 0; pages = 0; pageWins = @(); browser = 0; windows = @(); hidden = $false; rect = $null; lookUntil = [DateTime]::MinValue; startUntil = [DateTime]::MinValue; said = ''; site = 'ytm'; sites = @{}; shown = '' }
 
 # The one browser process started with a profile folder of this app's.
 function Find-Browser($dir) {
@@ -213,10 +215,14 @@ function Look {
   if ($s.pages -ne 0 -and $null -eq (Get-Process -Id $s.pages)) { $s.pages = 0 }
   if ($s.pages -eq 0 -and [DateTime]::Now -lt $s.lookUntil) { $s.pages = Find-Browser $pagesDir }
   $now = @()
-  if ($s.browser -ne 0) { $now = @([PlayerWin]::Windows([uint32]$s.browser, [long[]]$s.windows, $false)) }
+  # At the start, a browser of Cla-Amp's own that was left running (the app
+  # was closed and its browser lived on) is taken back with all its windows,
+  # tucked-away ones too, so the deck knows of them and can show or close them.
+  $isStart = [DateTime]::Now -lt $s.startUntil
+  if ($s.browser -ne 0) { $now = @([PlayerWin]::Windows([uint32]$s.browser, [long[]]$s.windows, $false, $isStart)) }
   # Cla-Amp's browser is an ordinary window with tabs: those count too.
   $pagesNow = @()
-  if ($s.pages -ne 0) { $pagesNow = @([PlayerWin]::Windows([uint32]$s.pages, [long[]]$s.windows, $true)) }
+  if ($s.pages -ne 0) { $pagesNow = @([PlayerWin]::Windows([uint32]$s.pages, [long[]]$s.windows, $true, $isStart)) }
   $s.pageWins = $pagesNow
   $now = @($now) + @($pagesNow)
   # One claude.ai window at a time: a link opened from a chat takes the place
@@ -227,6 +233,19 @@ function Look {
   if ($claudeNew.Count -gt 0 -and $claudeAll.Count -gt 1) {
     $keep = $claudeNew[$claudeNew.Count - 1]
     foreach ($old in @($claudeAll | Where-Object { $_ -ne $keep })) { [PlayerWin]::Close($old) }
+  }
+  # One window per music player too: two in one spot lie over each other and
+  # take turns in front. The one that was already here stays (it may be the
+  # one playing); the newcomer is closed. Only windows whose title names the
+  # player: a sign-in window or any other the player opens is left alone.
+  foreach ($word in @('*YouTube Music*', '*Spotify*')) {
+    $same = @($now | Where-Object { -not [PlayerWin]::IsTabbed($_) -and [PlayerWin]::Name($_) -like $word })
+    if ($same.Count -gt 1) {
+      $known = @($same | Where-Object { $s.windows -contains $_ })
+      $keep = if ($known.Count -gt 0) { $known[0] } else { $same[0] }
+      foreach ($extra in @($same | Where-Object { $_ -ne $keep })) { [PlayerWin]::Close($extra) }
+      $now = @($now | Where-Object { $_ -eq $keep -or $same -notcontains $_ })
+    }
   }
   foreach ($one in $now) {
     if ($s.windows -notcontains $one) {
@@ -259,23 +278,23 @@ function Look {
   Say
 }
 
-# Closes the docked windows, hidden ones too, and makes sure their browser is
-# gone: it is asked to close, given four seconds, then stopped. Only the one
-# browser process that was started with the player's own profile folder.
+# Closes the docked windows, hidden ones too, by stopping their browser. Only
+# the browser processes that were started with this app's own profile folders.
 function Shut {
-  foreach ($one in $s.windows) { [PlayerWin]::Close($one) }
+  # The windows are tucked away at once, then their browser is stopped with
+  # every process it started. They are not asked to close: a player that is
+  # playing answers that with its own "Leave app?" box and stays open.
+  foreach ($one in $s.windows) { [PlayerWin]::Show($one, $false) }
   if ($s.browser -eq 0) { $s.browser = Find-Browser $playerDir }
   if ($s.pages -eq 0) { $s.pages = Find-Browser $pagesDir }
   foreach ($key in @('browser', 'pages')) {
     if ($s[$key] -eq 0) { continue }
-    $isGone = $false
-    for ($i = 0; $i -lt 16; $i++) {
-      if ($null -eq (Get-Process -Id $s[$key])) { $isGone = $true; break }
-      Start-Sleep -Milliseconds 250
+    if ($null -ne (Get-Process -Id $s[$key] -ErrorAction SilentlyContinue)) {
+      & "$env:SystemRoot\System32\taskkill.exe" /PID $s[$key] /T /F | Out-Null
     }
-    if (-not $isGone) { Stop-Process -Id $s[$key] -Force }
     $s[$key] = 0
   }
+  $s.windows = @()
 }
 
 function Let-Go {
@@ -285,8 +304,10 @@ function Let-Go {
   }
 }
 
-# One look at the start: a player left open over an app restart is taken back.
-$s.lookUntil = [DateTime]::Now.AddSeconds(3)
+# A look at the start: a player left open over an app restart, or left
+# running when the app was closed, is taken back.
+$s.lookUntil = [DateTime]::Now.AddSeconds(15)
+$s.startUntil = $s.lookUntil
 # Read through a plain stream: the console's own reader would block the loop.
 $reader = New-Object IO.StreamReader([Console]::OpenStandardInput())
 $line = $reader.ReadLineAsync()

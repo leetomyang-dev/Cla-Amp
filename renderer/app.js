@@ -2631,6 +2631,16 @@ const renderTail = () => {
 
 // ---------------------------------------------------------------- left column
 
+// The spectrum shows the music, not Cla-Amp's own sounds. While one of those
+// plays and no music is sounding, what the speakers play is left out of it.
+// With music on, the music is what shows and the chime is lost in it.
+let ownSoundUntil = 0
+document.addEventListener('own-sound', event => {
+  if (!deck.isSounding) {
+    ownSoundUntil = performance.now() + (Number(event.detail) || 2000)
+  }
+})
+
 // The speaker by each volume slider shows whether that music is muted.
 const putMutes = () => {
   for (const mute of document.querySelectorAll('.vol-mute')) {
@@ -3585,8 +3595,9 @@ const DEMO_INFO = {
     plan: 'max',
     rows: [
       { label: '5-hour session', percent: 41, resetsAt: new Date(Date.now() + 2.4 * 3600000).toISOString() },
-      { label: 'Week, all models', percent: 38, resetsAt: new Date(Date.now() + 62 * 3600000).toISOString() },
+      { label: 'Week, all models', percent: 70, resetsAt: new Date(Date.now() + 62 * 3600000).toISOString() },
       { label: 'Week, Fable', percent: 26, resetsAt: new Date(Date.now() + 62 * 3600000).toISOString() },
+      { label: 'Extra usage credits', percent: 25, resetsAt: null, money: { used: 1234, limit: 5000, currency: 'USD', isOn: true } },
     ],
   },
   servers: [
@@ -3671,14 +3682,127 @@ const renderBarExtras = () => {
   const rows = usage?.isAvailable ? usage.rows.filter(row => row.percent !== null) : []
   const short = label => (/week/i.test(label) ? (/opus|sonnet|haiku|fable/i.exec(label)?.[0] ?? 'Week') : /session|hour|5/i.test(label) ? 'Session' : label)
   $('sbLimits').textContent = rows.length > 0 ? rows.slice(0, 3).map(row => `${short(row.label)} ${Math.round(row.percent)}%`).join('  \u00b7  ') : 'Limits: --'
-  $('sbLimits').title = rows.length > 0 ? rows.map(row => `${row.label}: ${Math.round(row.percent)}% used. ${startsOver(row.resetsAt)}`).join('\n') : 'Your plan\'s limits show here once they have been read'
+  $('sbLimits').title = rows.length > 0 ? rows.map(row => (row.money && creditWords(row.money) ? `${row.label}: ${creditWords(row.money)}` : `${row.label}: ${Math.round(row.percent)}% used. ${startsOver(row.resetsAt)}`)).join('\n') : 'Your plan\'s limits show here once they have been read'
   const now = new Date()
   $('sbDate').textContent = now.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
   $('sbTime').textContent = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 }
 
+// ---- how the plan's limits are going ----
+
+const dayAndTime = at => new Date(at).toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+
+/**
+ * Where a limit stands and where it is heading: what is left, and whether
+ * the pace so far reaches the limit before it starts over. The pace is the
+ * share used spread over the part of the window that has gone by; too early
+ * in a window (its first twentieth) nothing is said about pace.
+ * Gives { state: 'reached' | 'ahead' | 'fine' | 'plain', words, short }.
+ */
+const paceOf = row => {
+  if (row.money || typeof row.percent !== 'number') {
+    return null
+  }
+
+  const used = Math.min(100, Math.max(0, row.percent))
+  const left = Math.round(100 - used)
+  const isSession = /session|hour/i.test(row.label)
+  const model = /week,\s*(.+)$/i.exec(row.label)?.[1]
+  const name = isSession ? '5-hour session' : model && !/all models/i.test(model) ? `weekly ${model}` : 'weekly'
+  const resets = Date.parse(row.resetsAt ?? '')
+  const when = Number.isNaN(resets) ? '' : dayAndTime(resets)
+
+  if (used >= 100) {
+    return { state: 'reached', short: when ? `Reached. Starts over ${when}` : 'Reached', words: `You have reached your ${name} limit.${when ? ` It starts over ${when}.` : ''}` }
+  }
+
+  const head = `You have ${left}% of your ${name} limit left.`
+  const long = (isSession ? 5 : 7 * 24) * 3600000
+  const gone = long - (resets - Date.now())
+
+  if (Number.isNaN(resets) || gone < long / 20 || gone > long || used <= 0) {
+    return { state: 'plain', short: '', words: when ? `${head} It starts over ${when}.` : head }
+  }
+
+  // At the pace so far, when the rest would be used up.
+  const reach = Date.now() + ((100 - used) / used) * gone
+
+  return reach < resets
+    ? { state: 'ahead', short: `At this pace: reached ${dayAndTime(reach)}`, words: `${head} At this pace you would reach it around ${dayAndTime(reach)}, before it starts over ${when}.` }
+    : { state: 'fine', short: 'On track to stay within it', words: `${head} At this pace you are on track to stay within it until it starts over ${when}.` }
+}
+
+// The reminder above the message box: shown when a limit is reached, is
+// heading to be reached before it starts over, or has a quarter or less
+// left. Closed with its cross, it stays away until that limit starts over
+// or gets worse.
+const renderUsageNote = () => {
+  const box = $('usageNote')
+  const usage = engine.info?.usage
+  const rank = { reached: 0, ahead: 1, plain: 2, fine: 2 }
+  const found = (usage?.isAvailable ? usage.rows : [])
+    .map(row => ({ row, pace: paceOf(row) }))
+    .filter(one => one.pace && (one.pace.state === 'reached' || one.pace.state === 'ahead' || one.row.percent >= 75))
+    .sort((a, b) => rank[a.pace.state] - rank[b.pace.state] || b.row.percent - a.row.percent)[0]
+  const key = found ? `${found.row.label}|${found.pace.state}|${found.row.resetsAt ?? ''}` : ''
+
+  if (!found || localStorage.getItem('usageNoteShut') === key) {
+    box.classList.add('hidden')
+    box.dataset.key = ''
+
+    return
+  }
+
+  if (box.dataset.key === key && box.dataset.words === found.pace.words) {
+    return
+  }
+  box.dataset.key = key
+  box.dataset.words = found.pace.words
+  box.className = `usage-note ${found.pace.state}`
+  const shut = el('button', 'usage-note-x', '\u2715')
+  shut.type = 'button'
+  shut.title = 'Close this reminder. It comes back when the limit starts over or gets closer.'
+  shut.setAttribute('aria-label', 'Close this reminder')
+  shut.addEventListener('click', () => {
+    localStorage.setItem('usageNoteShut', key)
+    renderUsageNote()
+  })
+  box.replaceChildren(el('span', '', found.pace.words), shut)
+}
+
+/** An amount in a currency's small unit (cents) as money: 1234, 'USD' reads $12.34. */
+const asMoney = (small, currency) => {
+  try {
+    const shape = new Intl.NumberFormat(undefined, { style: 'currency', currency })
+
+    return shape.format(small / 10 ** (shape.resolvedOptions().maximumFractionDigits ?? 2))
+  } catch {
+    return `${(small / 100).toFixed(2)} ${currency}`
+  }
+}
+
+/** The credits of extra usage in words: what is spent, the month's limit, and what is left. */
+const creditWords = money => {
+  if (!money) {
+    return ''
+  }
+
+  const { used, limit, currency } = money
+
+  if (used !== null && limit !== null) {
+    return `${asMoney(Math.max(0, limit - used), currency)} left: ${asMoney(used, currency)} of ${asMoney(limit, currency)} spent this month`
+  }
+
+  if (used !== null) {
+    return `${asMoney(used, currency)} spent this month, no monthly limit set`
+  }
+
+  return limit !== null ? `Monthly limit ${asMoney(limit, currency)}` : ''
+}
+
 const renderLimits = () => {
   renderBarExtras()
+  renderUsageNote()
   const box = $('limits')
   const usage = engine.info?.usage
   box.replaceChildren()
@@ -3704,10 +3828,17 @@ const renderLimits = () => {
       const words = el('div', 'limit-words')
       words.append(
         el('span', 'limit-name', row.label),
-        el('small', '', row.percent === null ? 'Nothing used in this window yet' : `${Math.round(used)}% used, ${Math.round(100 - used)}% left`),
-        el('small', '', row.percent === null ? '' : startsOver(row.resetsAt)),
+        el('small', '', row.money && creditWords(row.money) ? creditWords(row.money) : row.percent === null ? 'Nothing used in this window yet' : `${Math.round(used)}% used, ${Math.round(100 - used)}% left`),
+        el('small', '', row.money ? (row.money.isOn ? 'Used once the plan\'s own limits are reached' : 'Switched off: nothing is charged to it') : row.percent === null ? '' : startsOver(row.resetsAt)),
       )
-      one.title = row.percent === null ? `${row.label}: nothing used yet` : `${row.label}: ${Math.round(used)}% used, ${Math.round(100 - used)}% left. ${startsOver(row.resetsAt)}`
+      const pace = paceOf(row)
+
+      if (pace?.short) {
+        words.append(el('small', `limit-pace ${pace.state}`, pace.short))
+      }
+      one.title = row.money
+        ? `${row.label}: ${creditWords(row.money) || 'no amount reported'}. Credits bought on top of your plan; change them in your Claude account's settings.`
+        : row.percent === null ? `${row.label}: nothing used yet` : (pace?.words ?? `${row.label}: ${Math.round(used)}% used, ${Math.round(100 - used)}% left. ${startsOver(row.resetsAt)}`)
       one.append(usageRing(used), words)
       box.append(one)
     }
@@ -5000,7 +5131,8 @@ const onDeck = status => {
 
   const frame = status.sp?.[status.sp.length - 1]
 
-  if (frame) {
+  // Cla-Amp's own chime, heard through the speakers with no music on, is not shown.
+  if (frame && performance.now() >= ownSoundUntil) {
     deck.target = frame
     deck.isSounding = Math.max(...frame) > 0.03
   }
@@ -6430,6 +6562,14 @@ const wire = () => {
   savePanels = () => {
     const panels = [...right.querySelectorAll('.panel'), ...right2.querySelectorAll('.panel')]
     localStorage.setItem('panels', JSON.stringify(panels.map(one => [one.dataset.panel, one.classList.contains('closed'), one.parentElement === right2 ? 1 : 0])))
+
+    // Arrange mode keeps its own record of what sits where, and that record
+    // is put back last at the start. A panel moved outside Arrange mode
+    // (dragged, or Move up and Move down) goes into it too, or the older
+    // record would put the panel back where it was.
+    if (localStorage.getItem('places') !== null) {
+      savePlaces()
+    }
   }
   document.body.classList.toggle('col2', localStorage.getItem('col2') === '1')
   document.body.classList.toggle('side-tall', localStorage.getItem('sideTall') === '1')

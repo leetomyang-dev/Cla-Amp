@@ -1213,3 +1213,13 @@ body.calm .proj.news .proj-name::after { animation: none; }
 .vol-mute.on { color: var(--red); }
 .vol-mute.on::after { content: ''; position: absolute; left: 2px; right: 2px; top: 9px; height: 2px; background: var(--red); transform: rotate(-45deg); border-radius: 1px; }
 #chimeBtn.muted { opacity: 0.75; }
+/* The reminder above the message box about the plan's limits, and the pace line in the Usage panel. */
+.usage-note { display: flex; align-items: flex-start; gap: 8px; margin: 0 10px 6px; padding: 6px 10px; border: 1px solid var(--line); border-left: 4px solid var(--led); border-radius: 6px; background: var(--panel); color: var(--text); font-size: 12px; }
+.usage-note span { flex: 1; min-width: 0; }
+.usage-note.ahead { border-left-color: var(--amber); }
+.usage-note.reached { border-left-color: var(--red); }
+.usage-note-x { flex: none; border: 0; background: none; color: var(--dim); font-size: 11px; padding: 0 2px; cursor: pointer; }
+.usage-note-x:hover { color: var(--text); }
+.limit small.limit-pace.fine { color: var(--led); }
+.limit small.limit-pace.ahead { color: var(--amber); }
+.limit small.limit-pace.reached { color: var(--red); }

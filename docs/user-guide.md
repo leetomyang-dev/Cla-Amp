@@ -263,6 +263,31 @@ working or finished.
   This only tidies the list: what they did stays saved in the chat, and
   an agent that is still working cannot be removed here.
 
+## How your limits are going
+
+Each row of the **Usage limits** panel says where that limit is heading:
+**On track to stay within it**, or **At this pace: reached** with the
+day and time, worked out from how much is used and how much of the
+window has gone by. When a limit is reached, is heading to be reached
+before it starts over, or has a quarter or less left, a reminder shows
+above the message box, for example "You have 30% of your weekly limit
+left. At this pace you are on track to stay within it until it starts
+over Thu, Nov 19, 11:52 AM." or "You have reached your weekly limit. It
+starts over Thu, Nov 19, 11:52 AM." Its cross closes it until that limit
+starts over or gets closer. The pace is an estimate from your use so
+far, not a promise.
+
+## Credits
+
+If your Claude account has extra usage (credits bought on top of the
+plan), the **Usage limits** panel has a row for it, **Extra usage
+credits**: how much is left, how much of the month's limit is spent, and
+whether it is switched on. Point at **Limits** in the status bar for the
+same in one line. Accounts without extra usage have no such row. The
+figures are your account's own, read through Claude Code as the other
+limits are; buying credits or changing the limit is done in your Claude
+account's settings, not here.
+
 ## Closing Cla-Amp
 
 Closing always asks first, in a box over the window. When nothing is
@@ -270,6 +295,13 @@ running it only asks whether to close. When Claude is still working it
 names the projects, says how many agents are running and how many
 messages are waiting to be sent, and warns that closing stops that
 work; the chats themselves stay saved.
+
+Closing Cla-Amp also closes the browser windows that belong to it: the
+music players, its claude.ai window and its own Browser. They are
+stopped outright, not asked, so a player that is playing cannot hold
+things up with a "Leave app?" box of its own.
+Your everyday browser is a different one and is never touched. A
+restart of Cla-Amp is the exception: the music plays on through it.
 
 ## Picking up where you left off
 
@@ -279,6 +311,21 @@ and chat that were open, the tab on the left, where you were reading in
 each chat, and any message you had typed but not sent. A chat you were
 following to its end opens at its end. If the screen the window was on is
 gone, it opens on the one you have.
+
+## A player left running is taken back
+
+Should a music player of Cla-Amp's be still running when Cla-Amp starts
+(left over from a run that did not close it), Cla-Amp finds it in its
+first seconds and takes it back, its tucked-away window too: the Music
+deck shows what it plays, and it can be shown, paused or closed from
+Cla-Amp again.
+
+## One window per music player
+
+YouTube Music has one window and Spotify has one window, never two of
+the same. Pressing play may start a player with its window tucked away,
+as you last left it; opening that player afterwards brings that same
+window out instead of starting another.
 
 ## Muting the music
 
@@ -300,7 +347,8 @@ red for ended with an error.
 The bell in the title bar mutes and unmutes the chime with one press.
 Under **Widgets**, **Notices** picks **Flash and chime**, **Flash only**
 or **Off**. The chime is made by Cla-Amp itself and follows the
-computer's volume, not the music deck's.
+computer's volume, not the music deck's. The spectrum shows music only:
+the chime does not make it move.
 
 ## Buttons stay where they are
 

@@ -48,6 +48,8 @@ export const chime = (isOk = true) => {
     sound ??= new AudioContext()
     void sound.resume()
     const at = sound.currentTime + 0.02
+    // The spectrum listens to the speakers: it is told, so the chime does not make it dance.
+    document.dispatchEvent(new CustomEvent('own-sound', { detail: 2200 }))
 
     if (isOk) {
       note(at, 659.25, 0.16, 0.9)
