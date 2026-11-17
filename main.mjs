@@ -1871,10 +1871,12 @@ const restartNow = () => {
   }
 
   // The player is let go first, so the music plays on; the new run takes it back.
+  // A restart the person asked for is not asked about again when the window closes.
+  isRestarting = true
+
   if (playerHelper === null) {
     go()
   } else {
-    isRestarting = true
     playerHelper.once('exit', go)
     playerSay('release')
     setTimeout(go, 2500)
@@ -3911,6 +3913,17 @@ const handlers = {
       session.setStatus(session.status)
     }
   },
+  // A chat is done or waits for an answer: the taskbar button flashes until
+  // the person comes back. Nothing happens while Cla-Amp is the window in front.
+  'win:flash': () => {
+    if (win === null || win.isDestroyed() || SHOT || win.isFocused()) {
+      return false
+    }
+    win.flashFrame(true)
+    win.once('focus', () => win !== null && !win.isDestroyed() && win.flashFrame(false))
+
+    return true
+  },
   // The window's smallest width follows the columns on show, so the chat is
   // never squeezed and no column is cut off. A window narrower than that is widened.
   'win:least': asked => {
@@ -4524,15 +4537,41 @@ const createWindow = () => {
   // Closing Cla-Amp closes the player with it (a restart lets it play on).
   win.on('close', event => {
     keepPlace(true)
-    // Work that was started from here stops when the window closes: ask first.
+    // Closing always asks first, in a box over the window. Work that was
+    // started from here stops when the window closes, so the box says what
+    // is still running: chats, their agents, and messages waiting their turn.
+    // A restart asks only when something is running.
     const busy = [...sessions.values()].filter(one => one.isBusy || one.agentCount > 0 || one.queue.length > 0)
+
+    if (busy.length === 0 && !isCloseAgreed && !isRestarting && !SHOT) {
+      const picked = dialog.showMessageBoxSync(win, {
+        type: 'question',
+        title: 'Cla-Amp',
+        message: 'Close Cla-Amp?',
+        detail: 'Nothing is running: no chat is working and no agent is out. Your chats are saved, and Cla-Amp opens again where you left off. The music stops.',
+        buttons: ['Keep Cla-Amp open', 'Close'],
+        defaultId: 1,
+        cancelId: 0,
+        noLink: true,
+      })
+
+      if (picked !== 1) {
+        event.preventDefault()
+
+        return
+      }
+      isCloseAgreed = true
+    }
 
     if (busy.length > 0 && !isCloseAgreed) {
       const names = busy.map(one => one.project.name).slice(0, 6).join(', ')
+      const agents = busy.reduce((sum, one) => sum + (one.agentCount || 0), 0)
+      const waiting = busy.reduce((sum, one) => sum + one.queue.length, 0)
+      const running = [agents > 0 ? `${agents} ${agents === 1 ? 'agent is' : 'agents are'} running` : '', waiting > 0 ? `${waiting} ${waiting === 1 ? 'message is' : 'messages are'} waiting to be sent` : ''].filter(Boolean).join(', and ')
       const picked = dialog.showMessageBoxSync(win, {
         type: 'warning',
         title: 'Cla-Amp',
-        message: `Claude is still working in ${busy.length === 1 ? names : `${busy.length} projects (${names})`}.`,
+        message: `Claude is still working in ${busy.length === 1 ? names : `${busy.length} projects (${names})`}${running ? `: ${running}` : ''}.`,
         detail: `${isRestarting ? 'Restarting' : 'Closing'} Cla-Amp stops that work and drops any messages still waiting in the queue. The chats themselves stay saved.\n\nWork running in the Claude desktop app or a terminal is not touched.`,
         buttons: ['Keep Cla-Amp open', isRestarting ? 'Restart anyway' : 'Close anyway'],
         defaultId: 0,

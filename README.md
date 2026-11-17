@@ -42,6 +42,9 @@ Windows only for now.
 - **Made to be reachable.** Everything by keyboard, a size control, a
   Calm setting that stops all movement, a High Contrast skin, and words
   for screen readers.
+- **Know when Claude is done.** A chime and a flashing taskbar button
+  when a chat finishes or waits for you, a marker on the project it
+  happened in, a mute bell, and a Stay awake switch for long work.
 - **Use it in your language.** The window's own words come in twelve
   languages (machine-translated; English where a piece is missing).
 - **Change the program itself by asking.** Cla-Amp is its own source code:

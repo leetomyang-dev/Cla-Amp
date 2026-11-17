@@ -12,6 +12,7 @@ import { buildEqualizer, tuner } from './equalizer.js'
 import { openGuides } from './guides.js'
 import { LANGS, langChoice, setLang } from './lang.js'
 import { openLook, startLook } from './look.js'
+import { chime, flash, noticeChoice, setNotices } from './notice.js'
 import { isBig, setBig } from './places.js'
 import { openThemes } from './themes.js'
 import { openSettings } from './settings.js'
@@ -144,6 +145,8 @@ const takeDraft = () => {
 const select = async id => {
   keepDraft()
   activeId = id
+  // Opened: what it had to tell has been seen.
+  seen(projects.get(id))
   takeDraft()
   localStorage.setItem('active', id ?? '')
   const project = active()
@@ -2628,6 +2631,39 @@ const renderTail = () => {
 
 // ---------------------------------------------------------------- left column
 
+// The speaker by each volume slider shows whether that music is muted.
+const putMutes = () => {
+  for (const mute of document.querySelectorAll('.vol-mute')) {
+    const isMuted = Number(mute.parentElement.querySelector('input[type="range"]')?.value) === 0
+    mute.classList.toggle('on', isMuted)
+    mute.title = isMuted ? 'Muted. Press to bring the sound back.' : 'Mute this music'
+    mute.setAttribute('aria-label', isMuted ? 'Unmute' : 'Mute')
+  }
+}
+// The bell in the title bar: lit while the chime is on, struck through while muted.
+const putChime = () => {
+  const isOn = noticeChoice() === 'all'
+  $('chimeBtn').classList.toggle('on', isOn)
+  $('chimeBtn').classList.toggle('muted', !isOn)
+  $('chimeBtn').textContent = isOn ? '\u{1F514}' : '\u{1F515}'
+}
+
+// A project whose chat finished, or stopped to ask, while the person was
+// looking elsewhere is marked in the list until they open it or come back to it.
+const seen = project => {
+  if (project?.news) {
+    project.news = ''
+    renderProjects()
+  }
+}
+const tell = (project, news) => {
+  if (project.id !== activeId || !document.hasFocus()) {
+    project.news = news
+    renderProjects()
+  }
+}
+window.addEventListener('focus', () => seen(projects.get(activeId)))
+
 const renderProjects = () => {
   const list = $('projectList')
   list.replaceChildren()
@@ -2637,7 +2673,11 @@ const renderProjects = () => {
   }
 
   for (const project of projects.values()) {
-    const row = el('div', `proj${project.id === activeId ? ' active' : ''}`)
+    const row = el('div', `proj${project.id === activeId ? ' active' : ''}${project.news ? ` news ${project.news}` : ''}`)
+
+    if (project.news) {
+      row.title = project.news === 'asks' ? 'Claude is waiting for your answer here' : project.news === 'failed' ? 'This chat ended with an error since you last looked' : 'This chat finished since you last looked'
+    }
     const text = el('div', 'proj-text')
     text.append(el('div', 'proj-name', project.name), el('div', 'proj-detail', project.detail ?? ''))
     const remove = el('button', 'proj-x', '\u2715')
@@ -4975,6 +5015,7 @@ const onDeck = status => {
     $('volume').value = String(level(tabOf()))
     $('volPct').textContent = `${$('volume').value}%`
     $('topVol').value = String(level(deck.source))
+    putMutes()
   }
 
   if (hadWebVol !== (deck.webVol !== null)) {
@@ -5609,6 +5650,18 @@ const wireWidgets = () => {
     bigPick.addEventListener('change', () => setBig(bigPick.value === '1'))
     bigRow.append(el('span', '', 'Buttons'), bigPick)
     bigRow.title = 'The row of buttons under the top row: small, with each picture beside its words, or big, with the picture above them and three more buttons (Customize, Settings, Guides). It stays as you set it in every skin.'
+    // What tells the person a chat is done or waits for them.
+    const noticeRow = el('label', 'wg-layout')
+    const noticePick = el('select')
+    noticePick.append(...[['all', 'Flash and chime'], ['flash', 'Flash only'], ['off', 'Off']].map(([value, words]) => Object.assign(el('option', '', words), { value })))
+    noticePick.value = noticeChoice()
+    noticePick.addEventListener('change', () => {
+      setNotices(noticePick.value)
+      putChime()
+      chime()
+    })
+    noticeRow.append(el('span', '', 'Notices'), noticePick)
+    noticeRow.title = 'When a chat is done or waits for your answer, the taskbar button flashes if Cla-Amp is not in front. A chime sounds when a chat is done.'
     // The language of the window's own text. Each language is listed under its own name.
     const langRow = el('label', 'wg-layout')
     const langPick = el('select')
@@ -5619,7 +5672,7 @@ const wireWidgets = () => {
     langRow.append(el('span', '', 'Language'), langPick)
     langRow.title = 'Changes the words of the window itself. Messages, code and the guides stay as they were written. The window draws itself again; chats keep running.'
     // First in the menu: what a person looks for before anything else.
-    menu.prepend(el('div', 'wg-head', 'Window'), langRow, sizeRow, calmRow, bigRow, el('hr'))
+    menu.prepend(el('div', 'wg-head', 'Window'), langRow, sizeRow, calmRow, bigRow, noticeRow, el('hr'))
     // It opens under its button, at the top of the window.
     const at = $('wgChoose').getBoundingClientRect()
     menu.style.top = `${Math.round(at.bottom + 4)}px`
@@ -5630,6 +5683,29 @@ const wireWidgets = () => {
     if (!event.target.closest('#wgChoose, #wgMenu')) {
       menu.classList.add('hidden')
     }
+  })
+
+  // Escape closes whatever is open on top of the window, one thing per press:
+  // a dialog and a right-click menu close themselves, the "/" list and the
+  // working list have their own handlers; the rest is closed here.
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || event.defaultPrevented || document.querySelector('dialog[open], .wg-menu.ctx')) {
+      return
+    }
+
+    if (!menu.classList.contains('hidden')) {
+      menu.classList.add('hidden')
+      $('wgChoose').focus()
+    } else if (!$('picker').classList.contains('hidden')) {
+      $('pickerClose').click()
+    } else if (!$('videoWin').classList.contains('hidden')) {
+      $('videoClose').click()
+    } else if (document.body.classList.contains('arranging')) {
+      setArranging(false)
+    } else {
+      return
+    }
+    event.preventDefault()
   })
 
   // More time zones: every zone the computer knows, by city.
@@ -6632,6 +6708,30 @@ const wire = () => {
   }
   wireVolume($('topVol'), () => deck.source)
   wireVolume($('volume'), tabOf)
+  // The little speaker by each volume slider mutes that music and brings it
+  // back to where it was. Muted is simply the slider at nothing.
+  for (const [slider, sourceOf] of [[$('topVol'), () => deck.source], [$('volume'), tabOf]]) {
+    const picture = slider.parentElement.querySelector('.sl-ico')
+    const mute = el('button', 'vol-mute')
+    mute.type = 'button'
+    picture.replaceWith(mute)
+    mute.append(picture)
+    mute.addEventListener('click', () => {
+      const key = `volBefore-${sourceOf()}`
+
+      if (Number(slider.value) > 0) {
+        localStorage.setItem(key, slider.value)
+        slider.value = '0'
+      } else {
+        slider.value = String(Math.max(5, Number(localStorage.getItem(key)) || 70))
+      }
+      slider.dispatchEvent(new Event('input'))
+      slider.dispatchEvent(new Event('change'))
+      putMutes()
+    })
+    slider.addEventListener('input', () => putMutes())
+  }
+  putMutes()
   const showTopPlayer = isOn => {
     document.body.classList.toggle('no-top-player', !isOn)
     $('topPlayerOn').checked = isOn
@@ -7009,6 +7109,15 @@ const start = async () => {
   requestAnimationFrame(animate)
   setInterval(renderNow, 1000)
 
+  // The bell: Cla-Amp's own sounds, on or muted. The flash stays as it is set.
+  putChime()
+  $('chimeBtn').addEventListener('click', () => {
+    setNotices(noticeChoice() === 'all' ? 'flash' : 'all')
+    putChime()
+    chime()
+    announce(noticeChoice() === 'all' ? 'Sounds on' : 'Sounds muted')
+  })
+
   if (isDemo) {
     loadDemo()
     renderDeck()
@@ -7069,7 +7178,12 @@ const start = async () => {
 
     if (event.t === 'permission') {
       announce(`Claude asks to use ${event.tool} in ${project.name}`, true)
+      flash()
+      tell(project, 'asks')
     } else if (event.t === 'result') {
+      flash()
+      tell(project, event.isOk === false ? 'failed' : 'done')
+      chime(event.isOk !== false)
       announce(event.isOk === false ? `${project.name}: the reply ended with an error` : `${project.name}: Claude finished replying`)
     }
 

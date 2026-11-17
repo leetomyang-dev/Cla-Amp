@@ -1195,3 +1195,21 @@ body.has-toolbar .transport .deck-btn { height: 52px !important; padding: 4px 8p
 .composer-row .chip-btn, .composer-row .send { margin: 0 !important; order: 0 !important; flex: none !important; border-width: 1px !important; }
 .composer-row .chip-btn { height: 26px !important; padding: 0 10px !important; overflow: hidden; }
 .composer-row .send { height: 28px !important; width: 40px !important; }
+/* A project with news: its chat finished (green), failed (red) or asks (amber)
+   while the person was looking elsewhere. A bar down its left edge and a dot
+   by its name, until it is opened. */
+.proj.news { position: relative; box-shadow: inset 4px 0 0 var(--led), 0 0 0 1px var(--led); }
+.proj.news.asks { box-shadow: inset 4px 0 0 var(--amber), 0 0 0 1px var(--amber); }
+.proj.news.failed { box-shadow: inset 4px 0 0 var(--red), 0 0 0 1px var(--red); }
+.proj.news .proj-name { font-weight: 700; }
+.proj.news .proj-name::after { content: ''; display: inline-block; width: 8px; height: 8px; margin-left: 7px; border-radius: 50%; background: var(--led); animation: news-dot 1.4s ease-in-out infinite; }
+.proj.news.asks .proj-name::after { background: var(--amber); }
+.proj.news.failed .proj-name::after { background: var(--red); }
+@keyframes news-dot { 50% { opacity: 0.25; } }
+body.calm .proj.news .proj-name::after { animation: none; }
+/* The speaker by a volume slider is a mute button; muted, it is struck through. */
+.vol-mute { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 4px; background: none; color: inherit; cursor: pointer; }
+.vol-mute:hover { background: var(--row-hover); }
+.vol-mute.on { color: var(--red); }
+.vol-mute.on::after { content: ''; position: absolute; left: 2px; right: 2px; top: 9px; height: 2px; background: var(--red); transform: rotate(-45deg); border-radius: 1px; }
+#chimeBtn.muted { opacity: 0.75; }

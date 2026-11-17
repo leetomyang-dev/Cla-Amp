@@ -263,6 +263,14 @@ working or finished.
   This only tidies the list: what they did stays saved in the chat, and
   an agent that is still working cannot be removed here.
 
+## Closing Cla-Amp
+
+Closing always asks first, in a box over the window. When nothing is
+running it only asks whether to close. When Claude is still working it
+names the projects, says how many agents are running and how many
+messages are waiting to be sent, and warns that closing stops that
+work; the chats themselves stay saved.
+
 ## Picking up where you left off
 
 Close Cla-Amp and open it again, and it comes back as you left it: the
@@ -271,6 +279,28 @@ and chat that were open, the tab on the left, where you were reading in
 each chat, and any message you had typed but not sent. A chat you were
 following to its end opens at its end. If the screen the window was on is
 gone, it opens on the one you have.
+
+## Muting the music
+
+The little speaker beside each volume slider, in the top player and in
+the Music deck, mutes that music with one press and brings it back to
+where it was with the next. Muted, the speaker is red and struck
+through.
+
+## When a chat is done or needs you
+
+When a chat finishes its reply, a short chime sounds, and if Cla-Amp is
+not the window in front its taskbar button flashes until you come back.
+The button also flashes, without a sound, when Claude stops to ask you
+something. A reply that ended with an error has a lower chime of its own.
+In the Projects list, a project whose chat finished or asked while you
+were looking elsewhere is marked until you open it: a bar down its left
+edge and a dot by its name, green for done, amber for waiting on you,
+red for ended with an error.
+The bell in the title bar mutes and unmutes the chime with one press.
+Under **Widgets**, **Notices** picks **Flash and chime**, **Flash only**
+or **Off**. The chime is made by Cla-Amp itself and follows the
+computer's volume, not the music deck's.
 
 ## Buttons stay where they are
 
@@ -283,6 +313,10 @@ window**. Under **Widgets**, **Buttons** picks the button row's kind:
 Theme, Settings and Help. It stays as you set it in every skin.
 
 ## Easier to see, hear and reach
+
+- **Escape closes what is open.** Any menu, list, dialog, viewer, the
+  floating video and Arrange mode close with the Esc key, one per press,
+  the topmost first.
 
 - **Size.** Hold Ctrl and press + or - to make everything in the window
   larger or smaller; Ctrl and 0 puts it back. The same choice is under

@@ -149,7 +149,7 @@ document.addEventListener('keydown', event => {
 
 // ---- what things are, and whether they are on ----
 
-const SWITCHES = '#awakeBtn, #shuffleSongs, #repeatSong, #topShuffle, #topRepeat, #mic, .lvl'
+const SWITCHES = '#awakeBtn, #chimeBtn, .vol-mute, #shuffleSongs, #repeatSong, #topShuffle, #topRepeat, #mic, .lvl'
 const TABS = '.tab, .seg-btn'
 
 const putState = node => {
