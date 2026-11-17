@@ -13,6 +13,7 @@ import { BrowserWindow, Menu, Tray, app, clipboard, dialog, ipcMain, powerSaveBl
 
 import { describeSong, readCover, readPlaylist, scanFolders } from './music-library.mjs'
 import { chatsFolder, countOutside, listOutside } from './outside-work.mjs'
+import { readCapped, readCappedLater, readTail, sizeAndBytes } from './safe-read.mjs'
 import { convertWinampSkin } from './winamp-skin.mjs'
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url))
@@ -417,8 +418,10 @@ const promptContent = prompt => {
     const kind = PICTURE_ENDS[path.extname(one).toLowerCase()]
 
     try {
-      if (kind && blocks.length <= ATTACH_PICTURES_MOST && fs.statSync(one).size <= ATTACH_PICTURE_BYTES) {
-        blocks.push({ type: 'image', source: { type: 'base64', media_type: kind, data: fs.readFileSync(one).toString('base64') } })
+      const bytes = kind && blocks.length <= ATTACH_PICTURES_MOST ? readCapped(one, ATTACH_PICTURE_BYTES) : null
+
+      if (bytes !== null) {
+        blocks.push({ type: 'image', source: { type: 'base64', media_type: kind, data: bytes.toString('base64') } })
       }
     } catch {
       // A picture that cannot be read stays a path in the text.
@@ -443,9 +446,15 @@ const picturesOf = content => {
       const folder = path.join(dataDir(), 'pictures')
       const file = path.join(folder, `${createHash('sha1').update(source.data).digest('hex')}.${kind}`)
 
-      if (!fs.existsSync(file)) {
-        fs.mkdirSync(folder, { recursive: true })
-        fs.writeFileSync(file, Buffer.from(source.data, 'base64'))
+      fs.mkdirSync(folder, { recursive: true })
+
+      try {
+        // 'wx': written only when it is not there yet, in one step.
+        fs.writeFileSync(file, Buffer.from(source.data, 'base64'), { flag: 'wx' })
+      } catch (error) {
+        if (error?.code !== 'EEXIST') {
+          throw error
+        }
       }
       found.push(pathToFileURL(file).href)
     } catch {
@@ -596,13 +605,8 @@ const readAgent = (projectId, toolId) => {
         }
 
         const file = path.join(folder, name.replace(/\.meta\.json$/, '.jsonl'))
-        const size = fs.statSync(file).size
         // A very long one: its last part.
-        const most = 6 * 1024 * 1024
-        const handle = fs.openSync(file, 'r')
-        const bytes = Buffer.alloc(Math.min(size, most))
-        fs.readSync(handle, bytes, 0, bytes.length, Math.max(0, size - most))
-        fs.closeSync(handle)
+        const bytes = readTail(file, 6 * 1024 * 1024)
         const messages = []
 
         for (const line of bytes.toString('utf8').split('\n')) {
@@ -954,15 +958,25 @@ class Session {
       return
     }
 
-    // Agents as the engine tracks them. One started in the background, or moved
-    // there later, stays listed until the engine says it ended.
+    // Agents, and other work (a command, a workflow, a monitor), as the engine
+    // tracks them. One started in the background, or moved there later, stays
+    // listed until the engine says it ended: closing Cla-Amp would stop it.
     if (message.type === 'system' && message.subtype === 'task_started') {
-      if ((message.task_type === 'local_agent' || message.subagent_type) && message.ambient !== true) {
-        const task = { id: String(message.tool_use_id ?? message.task_id), name: String(message.description ?? 'Agent').slice(0, 120), kind: String(message.subagent_type ?? 'agent').slice(0, 60), isBackground: message.is_backgrounded === true }
+      const isAgent = message.task_type === 'local_agent' || Boolean(message.subagent_type)
+
+      // Work in the cloud is not stopped by closing, and "ambient" work is the engine's own housekeeping.
+      if (message.ambient !== true && message.task_type !== 'remote_agent') {
+        const task = {
+          id: String(message.tool_use_id ?? message.task_id),
+          name: String(message.description || (isAgent ? 'Agent' : 'Background work')).slice(0, 120),
+          kind: isAgent ? String(message.subagent_type ?? 'agent').slice(0, 60) : taskKind(message.task_type),
+          isAgent,
+          isBackground: message.is_backgrounded === true,
+        }
         this.tasks.set(message.task_id, task)
 
         if (task.isBackground) {
-          this.emit({ t: 'agent-bg', id: task.id, name: task.name, kind: task.kind })
+          this.emit({ t: 'agent-bg', id: task.id, name: task.name, kind: task.kind, isTask: !task.isAgent })
           this.setStatus(this.status)
         }
       }
@@ -975,7 +989,7 @@ class Session {
 
       if (task && !task.isBackground && message.patch?.is_backgrounded === true) {
         task.isBackground = true
-        this.emit({ t: 'agent-bg', id: task.id, name: task.name, kind: task.kind })
+        this.emit({ t: 'agent-bg', id: task.id, name: task.name, kind: task.kind, isTask: !task.isAgent })
         this.setStatus(this.status)
       }
 
@@ -1165,8 +1179,14 @@ class Session {
 
   /** Switches to a saved conversation: the process ends, and the next prompt resumes that one. */
   /** Agents at work: those a tool call is waiting for, and those running in the background. */
+  /** Agents at work plus everything else running in the background: all of it stops if the app closes. */
   get agentCount() {
     return this.agents.size + [...this.tasks.values()].filter(one => one.isBackground && !this.agents.has(one.id)).length
+  }
+
+  /** The part of agentCount that is not an agent: background commands, workflows and monitors. */
+  get taskCount() {
+    return [...this.tasks.values()].filter(one => one.isBackground && !one.isAgent && !this.agents.has(one.id)).length
   }
 
   adopt(sessionId, events) {
@@ -1868,6 +1888,13 @@ let isRestarting = false
 let isCloseAgreed = false
 // Set while a restart waits for the work here to finish.
 let idleRestart = null
+/** What a background task that is not an agent is called in the list. */
+const taskKind = type => {
+  const name = String(type ?? '')
+
+  return name.includes('workflow') ? 'Background workflow' : name.includes('monitor') ? 'Background monitor' : 'Background command'
+}
+
 const busySessions = () => [...sessions.values()].filter(one => one.isBusy || one.agentCount > 0 || one.queue.length > 0)
 
 const restartNow = () => {
@@ -2706,9 +2733,10 @@ const deskChats = () => {
 
       if (one.isDirectory() && depth < 3) {
         walk(full, depth + 1)
-      } else if (/^local_[0-9a-f-]{36}\.json$/i.test(one.name) && fs.statSync(full).size < 4000000) {
+      } else if (/^local_[0-9a-f-]{36}\.json$/i.test(one.name)) {
         try {
-          const said = JSON.parse(fs.readFileSync(full, 'utf8'))
+          // Null when it is too large; reading that as JSON fails, and the record is skipped like any unreadable one.
+          const said = JSON.parse(String(readCapped(full, 4000000) ?? ''))
 
           if (typeof said?.sessionId === 'string' && /^[0-9a-f-]{36}$/i.test(String(said.cliSessionId))) {
             records.push(said)
@@ -2923,7 +2951,8 @@ const listThemes = () => {
       .map(one => {
         try {
           const file = path.join(themesFolder(), one)
-          const theme = fs.statSync(file).size < 300000 ? cleanTheme(JSON.parse(fs.readFileSync(file, 'utf8'))) : null
+          const bytes = readCapped(file, 300000)
+          const theme = bytes === null ? null : cleanTheme(JSON.parse(bytes.toString('utf8')))
 
           return theme ? { ...theme, file: one.slice(0, -5) } : null
         } catch {
@@ -3128,11 +3157,7 @@ const todayStats = async () => {
   for (const one of chats.slice(0, 60)) {
     try {
       const file = path.join(chatsFolder(), one.cwd.replace(/[^a-zA-Z0-9]/g, '-'), one.sessionId + '.jsonl')
-      const size = fs.statSync(file).size
-      const part = Buffer.alloc(Math.min(size, 4000000))
-      const handle = fs.openSync(file, 'r')
-      fs.readSync(handle, part, 0, part.length, size - part.length)
-      fs.closeSync(handle)
+      const part = readTail(file, 4000000)
 
       for (const line of part.toString('utf8').split('\n')) {
         // A message the person typed: a user entry that is not a tool's answer, a note of the app's or an agent's.
@@ -3395,14 +3420,16 @@ const handlers = {
         return { isOk: false }
       }
 
-      if (fs.statSync(picked.filePaths[0]).size > 300000) {
+      const bytes = readCapped(picked.filePaths[0], 300000)
+
+      if (bytes === null) {
         return { error: 'That file is too large to be a theme.' }
       }
 
       let raw
 
       try {
-        raw = JSON.parse(fs.readFileSync(picked.filePaths[0], 'utf8'))
+        raw = JSON.parse(bytes.toString('utf8'))
       } catch {
         return { error: 'That file is not a Cla-Amp theme.' }
       }
@@ -3596,11 +3623,13 @@ const handlers = {
     }
 
     try {
-      if (fs.statSync(file).size > 30 * 1024 * 1024) {
+      const bytes = readCapped(file, 30 * 1024 * 1024)
+
+      if (bytes === null) {
         return { error: 'That file is too large to be a Winamp skin.' }
       }
 
-      return keepWinampSkin(fs.readFileSync(file), path.basename(file).replace(/\.(wsz|zip)$/i, ''))
+      return keepWinampSkin(bytes, path.basename(file).replace(/\.(wsz|zip)$/i, ''))
     } catch (error) {
       return { error: error instanceof Error ? error.message : 'That file could not be read as a Winamp skin.' }
     }
@@ -3746,7 +3775,7 @@ const handlers = {
     try {
       const real = file.startsWith('file:') ? fileURLToPath(file) : file
 
-      return (await fs.promises.stat(real)).size > 400 * 1024 * 1024 ? null : await fs.promises.readFile(real)
+      return await readCappedLater(real, 400 * 1024 * 1024)
     } catch {
       return null
     }
@@ -3773,11 +3802,12 @@ const handlers = {
 
     const kind = { '.png': 'png', '.jpg': 'jpg', '.jpeg': 'jpg', '.gif': 'gif', '.webp': 'webp' }[path.extname(file).toLowerCase()]
 
-    if (!kind || fs.statSync(file).size > 40 * 1024 * 1024) {
+    const bytes = kind ? readCapped(file, 40 * 1024 * 1024) : null
+
+    if (bytes === null) {
       return { error: 'That is not a PNG, JPEG, GIF or WebP picture under 40 MB.' }
     }
 
-    const bytes = fs.readFileSync(file)
     const copy = path.join(lookFolder(), `${createHash('sha1').update(bytes).digest('hex')}.${kind}`)
     fs.mkdirSync(lookFolder(), { recursive: true })
     fs.writeFileSync(copy, bytes)
@@ -4019,17 +4049,17 @@ const handlers = {
     }
 
     const end = path.extname(file).toLowerCase()
-    const said = { name: path.basename(file), file, size: fs.statSync(file).size, canBrowse: BROWSER_ENDS.includes(end) }
+    // Its size and its text come from one opening of the file.
+    const { size, bytes: text } = sizeAndBytes(file, 2000000, !PICTURE_ENDS[end])
+    const said = { name: path.basename(file), file, size, canBrowse: BROWSER_ENDS.includes(end) }
 
     if (PICTURE_ENDS[end]) {
       return { ...said, kind: 'picture', url: pathToFileURL(file).href }
     }
 
-    if (said.size > 2000000) {
+    if (text === null) {
       return { ...said, kind: 'other', note: 'This file is too large to show here.' }
     }
-
-    const text = fs.readFileSync(file)
 
     // A file with empty bytes in it is not text.
     if (text.subarray(0, 8000).includes(0)) {
@@ -4594,9 +4624,10 @@ const createWindow = () => {
 
     if (busy.length > 0 && !isCloseAgreed) {
       const names = busy.map(one => one.project.name).slice(0, 6).join(', ')
-      const agents = busy.reduce((sum, one) => sum + (one.agentCount || 0), 0)
+      const tasks = busy.reduce((sum, one) => sum + (one.taskCount || 0), 0)
+      const agents = busy.reduce((sum, one) => sum + (one.agentCount || 0), 0) - tasks
       const waiting = busy.reduce((sum, one) => sum + one.queue.length, 0)
-      const running = [agents > 0 ? `${agents} ${agents === 1 ? 'agent is' : 'agents are'} running` : '', waiting > 0 ? `${waiting} ${waiting === 1 ? 'message is' : 'messages are'} waiting to be sent` : ''].filter(Boolean).join(', and ')
+      const running = [agents > 0 ? `${agents} ${agents === 1 ? 'agent is' : 'agents are'} running` : '', tasks > 0 ? `${tasks} background ${tasks === 1 ? 'command is' : 'commands are'} running` : '', waiting > 0 ? `${waiting} ${waiting === 1 ? 'message is' : 'messages are'} waiting to be sent` : ''].filter(Boolean).join(', and ')
       const picked = dialog.showMessageBoxSync(win, {
         type: 'warning',
         title: 'Cla-Amp',
@@ -4636,6 +4667,38 @@ const createWindow = () => {
     return { action: 'deny' }
   })
   win.webContents.on('will-navigate', event => event.preventDefault())
+  // Right-click in a box to type in: spelling suggestions for a misspelt word
+  // (Windows' own spell checker), then cut, copy and paste.
+  win.webContents.on('context-menu', (_event, params) => {
+    if (!params.isEditable) {
+      return
+    }
+
+    const contents = win.webContents
+    const word = params.misspelledWord
+    const can = params.editFlags
+    const rows = []
+
+    if (word) {
+      const fixes = params.dictionarySuggestions.slice(0, 6)
+      rows.push(
+        ...(fixes.length > 0
+          ? fixes.map(fix => ({ label: fix, click: () => contents.replaceMisspelling(fix) }))
+          : [{ label: 'No spelling suggestions', enabled: false }]),
+        { type: 'separator' },
+        { label: `Add "${word.slice(0, 40)}" to the dictionary`, click: () => contents.session.addWordToSpellCheckerDictionary(word) },
+        { type: 'separator' },
+      )
+    }
+    rows.push(
+      { label: 'Cut', enabled: can.canCut, click: () => contents.cut() },
+      { label: 'Copy', enabled: can.canCopy, click: () => contents.copy() },
+      { label: 'Paste', enabled: can.canPaste, click: () => contents.paste() },
+      { type: 'separator' },
+      { label: 'Select all', enabled: can.canSelectAll, click: () => contents.selectAll() },
+    )
+    Menu.buildFromTemplate(rows).popup({ window: win })
+  })
   void win.loadFile(path.join(ROOT, 'renderer', 'index.html'), IS_DEMO ? { query: { demo: '1' } } : {})
 
   // Work that a restart stopped is picked up once the window can show it.

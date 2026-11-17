@@ -342,6 +342,8 @@ body.no-right #right, body.no-right .splitter[data-side='right'] { display: none
 }
 .proj-ico { width: 24px; height: 24px; flex: none; background: url('folder.svg') center / contain no-repeat; }
 .proj-ico.agent { background-image: url('agent.svg'); }
+/* A background command, workflow or monitor: the same row as an agent, marked by shape. */
+.proj-ico.agent.task { border-radius: 3px; outline: 1px dashed currentColor; outline-offset: -2px; opacity: 0.85; }
 .proj-text { flex: 1; min-width: 0; }
 .proj-name { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .proj-detail { color: var(--dim); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

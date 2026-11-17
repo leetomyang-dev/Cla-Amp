@@ -8,6 +8,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 
+import { readCapped } from './safe-read.mjs'
+
 export const AUDIO = /\.(mp3|wav|m4a|wma|flac|aac)$/i
 const MAX_SONGS = 5000
 const MAX_TAG = 512 * 1024
@@ -516,11 +518,12 @@ const isSongLine = (base, raw) => {
  * network shares are left out.
  */
 export const readPlaylist = file => {
-  if (fs.statSync(file).size > MAX_PLAYLIST) {
+  const bytes = readCapped(file, MAX_PLAYLIST)
+
+  if (bytes === null) {
     throw new Error('That playlist is too large.')
   }
 
-  const bytes = fs.readFileSync(file)
   const base = path.dirname(file)
   const found = []
   // Each line with every way it can be read. A playlist says nothing about
@@ -687,11 +690,13 @@ const folderPicture = folder => {
   try {
     const file = path.join(folder, pick)
 
-    if (fs.statSync(file).size > MAX_COVER) {
+    const bytes = readCapped(file, MAX_COVER)
+
+    if (bytes === null) {
       return null
     }
 
-    const found = findPicture(fs.readFileSync(file))
+    const found = findPicture(bytes)
 
     return found ? { ...found, name: pick } : null
   } catch {

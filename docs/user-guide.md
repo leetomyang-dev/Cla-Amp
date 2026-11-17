@@ -177,6 +177,10 @@ To get a newer version later, close Cla-Amp and double-click **Update.bat** in t
   message box. **Send now** on one stops what Claude is doing and sends
   it at once; the others follow in their order. **Ctrl+Enter** sends
   the message you are writing that way. The **×** takes one out.
+- **Spelling.** A misspelt word in a box you type in is underlined.
+  Right-click it for suggestions, or to add the word to the dictionary;
+  the same menu has Cut, Copy, Paste and Select all. The checking is
+  done by Windows' own spell checker, on your computer.
 
 ## Your chats (the Code tab)
 
@@ -292,9 +296,16 @@ account's settings, not here.
 
 Closing always asks first, in a box over the window. When nothing is
 running it only asks whether to close. When Claude is still working it
-names the projects, says how many agents are running and how many
-messages are waiting to be sent, and warns that closing stops that
-work; the chats themselves stay saved.
+names the projects, says how many agents and how many background
+commands are running and how many messages are waiting to be sent, and
+warns that closing stops that work; the chats themselves stay saved.
+
+Work that Claude left running in the background counts too, even after
+its reply has ended: an agent, a long command (a build, a test run, a
+server), a workflow or a monitor. Each one has a row under its project
+with a "working" badge until it ends, and is counted in the running
+number in the status bar, so you can see before closing whether
+anything is still going.
 
 Closing Cla-Amp also closes the browser windows that belong to it: the
 music players, its claude.ai window and its own Browser. They are

@@ -161,8 +161,49 @@ for (const name of SOURCES) {
 }
 
 // The page: the words between tags, and the ones in title, placeholder, aria-label and alt.
-const page = fs.readFileSync(path.join(ROOT, 'renderer/index.html'), 'utf8').replace(/<!--[\s\S]*?-->/g, '').replace(/<script[\s\S]*?<\/script>/g, '')
-const plain = text => text.replace(/&#(\d+);/g, (_all, code) => String.fromCodePoint(Number(code))).replace(/&[lr]?[a-z]+;/g, one => ({ '&darr;': '↓', '&uarr;': '↑', '&times;': '×', '&hellip;': '…', '&middot;': '·' })[one] ?? one).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
+/**
+ * The text with every stretch from `open` to the end of `close` taken out,
+ * whatever the case of the letters. Found by position, start to end, so
+ * nothing that is left can join up into a new stretch; one that never closes
+ * goes to the end. A `close` without its last bracket ('</script') reaches to
+ * the next '>' so a closing tag with spaces in it is taken whole.
+ */
+const without = (text, open, close) => {
+  const low = text.toLowerCase()
+  let kept = ''
+  let at = 0
+
+  for (;;) {
+    const start = low.indexOf(open, at)
+
+    if (start === -1) {
+      return kept + text.slice(at)
+    }
+    kept += text.slice(at, start)
+    const end = low.indexOf(close, start + open.length)
+
+    if (end === -1) {
+      return kept
+    }
+
+    if (close.endsWith('>')) {
+      at = end + close.length
+    } else {
+      const shut = low.indexOf('>', end)
+
+      if (shut === -1) {
+        return kept
+      }
+      at = shut + 1
+    }
+  }
+}
+
+// This reads Cla-Amp's own page to list its words; nothing here is shown as HTML.
+const page = without(without(fs.readFileSync(path.join(ROOT, 'renderer/index.html'), 'utf8'), '<!--', '-->'), '<script', '</script')
+const NAMED = { darr: '↓', uarr: '↑', times: '×', hellip: '…', middot: '·', amp: '&', lt: '<', gt: '>', quot: '"', nbsp: ' ' }
+// Each &...; is turned once, in one pass, so what one turns into is never read as another.
+const plain = text => text.replace(/&(?:#(\d+)|([a-z]+));/g, (all, code, name) => (code ? String.fromCodePoint(Number(code)) : NAMED[name] ?? all))
 
 for (const [, text] of page.matchAll(/>([^<>]+)</g)) {
   take(plain(text), 'renderer/index.html')

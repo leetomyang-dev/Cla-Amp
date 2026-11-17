@@ -395,7 +395,8 @@ const apply = (project, event, isReplay = false) => {
       if (sub) {
         Object.assign(sub, { isBackground: true, status: 'working' })
       } else {
-        project.subs.push({ id: event.id, name: event.name || 'Agent', kind: event.kind || 'agent', status: 'working', isBackground: true })
+        // isTask: a background command, workflow or monitor rather than an agent.
+        project.subs.push({ id: event.id, name: event.name || 'Agent', kind: event.kind || 'agent', status: 'working', isBackground: true, isTask: event.isTask === true })
       }
       // Finished agents make room first, so a working one is never dropped from the list.
       project.subs = [...project.subs.filter(one => one.status !== 'working').slice(-4), ...project.subs.filter(one => one.status === 'working')]
@@ -1055,6 +1056,7 @@ if (isDemo) {
   window.demoEvent = event => {
     apply(active(), { ts: Date.now(), ...event })
     renderChat()
+    renderProjects()
   }
 }
 
@@ -2720,12 +2722,14 @@ Nothing is deleted: its chats stay saved (find them again with Open chat, the Co
         renderProjects()
       }
       words.append(el('div', 'proj-name', sub.name), el('div', 'proj-detail', sub.kind))
-      child.append(el('div', 'proj-ico agent'), words, el('span', `badge ${sub.status}`, BADGES[sub.status]))
-      child.title = `${sub.name}\nClick to see what this agent did.`
-      child.addEventListener('click', () => void openAgent(project, sub))
+      child.append(el('div', `proj-ico agent${sub.isTask ? ' task' : ''}`), words, el('span', `badge ${sub.status}`, BADGES[sub.status]))
+      child.title = sub.isTask
+        ? `${sub.name}\n${isOver ? 'This background work has ended.' : 'Running in the background. Closing Cla-Amp would stop it.'}`
+        : `${sub.name}\nClick to see what this agent did.`
+      child.addEventListener('click', () => (sub.isTask ? void select(project.id) : void openAgent(project, sub)))
       child.addEventListener('contextmenu', event =>
         popMenu(event, [
-          ['See what it did', () => void openAgent(project, sub)],
+          sub.isTask ? ['Open its chat', () => void select(project.id)] : ['See what it did', () => void openAgent(project, sub)],
           ...(isOver ? [['Take it off the list', drop]] : []),
           ['Clear finished agents', clearAgents],
         ]),

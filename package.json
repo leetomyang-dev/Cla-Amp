@@ -11,7 +11,7 @@
     "start": "electron .",
     "demo": "electron . --demo",
     "shot": "electron . --demo --shot=shot.png",
-    "test": "node tests/music-library.test.mjs && node --test tests/outside-work.test.mjs && node tests/winamp-skin.test.mjs && node tools/lang-strings.mjs"
+    "test": "node tests/music-library.test.mjs && node --test tests/outside-work.test.mjs tests/safe-read.test.mjs && node tests/winamp-skin.test.mjs && node tools/lang-strings.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.325",
