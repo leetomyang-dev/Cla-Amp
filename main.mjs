@@ -666,6 +666,8 @@ class Session {
     // Agents the engine runs in the background: task id to { id, name, kind, isBackground }.
     // They outlive the tool call that started them and the turn itself.
     this.tasks = new Map()
+    // Background work that has ended, by its row's id: see readTask.
+    this.ended = new Map()
     // When this app last wrote to the conversation, so the watcher can tell
     // its own writes from another app's.
     this.touched = Date.now()
@@ -981,6 +983,7 @@ class Session {
           // The engine's own id for it; an agent's saved conversation is filed under this.
           key: String(message.task_id),
           isBackground: message.is_backgrounded === true,
+          started: Date.now(),
         }
         this.tasks.set(message.task_id, task)
 
@@ -1010,6 +1013,19 @@ class Session {
       this.tasks.delete(message.task_id)
 
       if (task?.isBackground) {
+        // What it came to, kept so its row can still show it: the engine's own
+        // summary and the file it wrote the output to. The newest forty are kept.
+        this.ended.set(task.id, {
+          ...task,
+          status: String(message.status),
+          summary: String(message.summary ?? '').slice(0, 4000),
+          outputFile: typeof message.output_file === 'string' ? message.output_file : '',
+          ended: Date.now(),
+        })
+
+        for (const old of [...this.ended.keys()].slice(0, -40)) {
+          this.ended.delete(old)
+        }
         // One the person stopped is not a failure.
         this.emit({ t: 'agent-bg-done', id: task.id, isOk: message.status === 'completed' || message.status === 'stopped' })
         this.setStatus(this.status)
@@ -1154,6 +1170,48 @@ class Session {
       this.queue = []
       this.setStatus('working', 'Stopping')
       await this.query.interrupt().catch(() => {})
+    }
+  }
+
+  /**
+   * What one piece of background work that is not an agent (a command, a
+   * workflow, a monitor) is doing or did: its state, the engine's summary once
+   * it ended, and the end of what it printed. The output file's path comes
+   * only from the engine (its end notice, or the folder Claude Code keeps a
+   * chat's task output in), never from the window. Read only.
+   */
+  readTask(id) {
+    const live = [...this.tasks.values()].find(task => task.id === id && task.isBackground)
+    const task = live ?? this.ended.get(id)
+
+    if (!task) {
+      return { error: 'What this did is no longer kept. Its result is in the chat.' }
+    }
+
+    let output = ''
+    let isCut = false
+
+    for (const file of [task.outputFile, ...taskOutputFiles(this.project.sessionId, task.key)].filter(Boolean)) {
+      try {
+        const most = 200000
+        const bytes = readTail(file, most)
+        output = bytes.toString('utf8')
+        isCut = bytes.length >= most
+        break
+      } catch {
+        // Not there (yet); the next place is tried.
+      }
+    }
+
+    return {
+      name: task.name,
+      kind: task.kind,
+      status: live ? 'working' : task.status,
+      summary: live ? '' : task.summary,
+      started: task.started ?? 0,
+      ended: live ? 0 : task.ended,
+      output,
+      isCut,
     }
   }
 
@@ -1919,6 +1977,29 @@ let isRestarting = false
 let isCloseAgreed = false
 // Set while a restart waits for the work here to finish.
 let idleRestart = null
+/**
+ * Where Claude Code writes a background task's output while it runs:
+ * <temp>/claude/<a folder per project>/<chat id>/tasks/<task id>.output.
+ * Both ids must be plain ids, so no other path can be made from them.
+ */
+const taskOutputFiles = (sessionId, taskId) => {
+  if (!/^[\w-]{1,80}$/.test(String(sessionId ?? '')) || !/^[\w-]{1,80}$/.test(String(taskId ?? ''))) {
+    return []
+  }
+
+  try {
+    const base = path.join(os.tmpdir(), 'claude')
+
+    return fs
+      .readdirSync(base, { withFileTypes: true })
+      .filter(one => one.isDirectory())
+      .slice(0, 400)
+      .map(one => path.join(base, one.name, sessionId, 'tasks', `${taskId}.output`))
+  } catch {
+    return []
+  }
+}
+
 /** What a background task that is not an agent is called in the list. */
 const taskKind = type => {
   const name = String(type ?? '')
@@ -3298,6 +3379,8 @@ const handlers = {
   },
   'project:stop': id => sessionOf(id)?.stop(),
   // Stops one background agent or command of a chat; the chat itself carries on.
+  // What a background command of a chat is doing or did, for its row.
+  'task:read': (id, taskId) => (typeof taskId === 'string' ? (sessionOf(id)?.readTask(taskId) ?? { error: 'That chat is not open any more.' }) : null),
   'task:stop': async (id, taskId) => (typeof taskId === 'string' ? (await sessionOf(id)?.stopTask(taskId)) === true : false),
   // What is saved about a project (its model and effort among it), answered at once: no Claude Code process is started for it.
   'project:describe': id => {

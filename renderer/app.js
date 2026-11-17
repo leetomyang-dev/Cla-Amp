@@ -802,6 +802,8 @@ const viewPicture = (src, name = '') => {
   }
   const onKey = event => {
     if (event.key === 'Escape') {
+      // Also keeps a sheet under the viewer from closing on the same press.
+      event.preventDefault()
       event.stopPropagation()
       close()
     }
@@ -814,9 +816,30 @@ const viewPicture = (src, name = '') => {
   stage.addEventListener('click', close)
   shut.addEventListener('click', close)
   document.addEventListener('keydown', onKey, true)
-  document.body.append(box)
+  // Over an open sheet (an agent's window) the viewer goes inside that sheet
+  // and on the top layer: outside it, it would lie under the sheet and could
+  // not be clicked.
+  const sheet = [...document.querySelectorAll('dialog[open]')].at(-1)
+
+  if (sheet) {
+    box.popover = 'manual'
+    sheet.append(box)
+    box.showPopover()
+  } else {
+    document.body.append(box)
+  }
   shut.focus()
 }
+
+/** Makes every picture inside `node` open in the picture viewer when clicked. */
+const picturesOpen = node =>
+  node.addEventListener('click', event => {
+    if (event.target instanceof HTMLImageElement && event.target.naturalWidth > 0 && !event.target.closest('.pic-view')) {
+      event.preventDefault()
+      event.stopPropagation()
+      viewPicture(event.target.src, event.target.alt)
+    }
+  })
 
 /** The folders this chat's tools have worked in, the most used first: where a short name in a reply may belong. */
 const workFolders = () => {
@@ -2744,12 +2767,12 @@ Nothing is deleted: its chats stay saved (find them again with Open chat, the Co
       words.append(el('div', 'proj-name', sub.name), el('div', 'proj-detail', sub.kind))
       child.append(el('div', `proj-ico agent${sub.isTask ? ' task' : ''}`), words, el('span', `badge ${sub.status}`, BADGES[sub.status]))
       child.title = sub.isTask
-        ? `${sub.name}\n${isOver ? 'This background work has ended.' : 'Running in the background. Closing Cla-Amp would stop it.'}`
+        ? `${sub.name}\n${isOver ? 'This background work has ended.' : 'Running in the background. Closing Cla-Amp would stop it.'}\nClick to see what it did.`
         : `${sub.name}\nClick to see what this agent did.`
-      child.addEventListener('click', () => (sub.isTask ? void select(project.id) : void openAgent(project, sub)))
+      child.addEventListener('click', () => (sub.isTask ? void openTask(project, sub) : void openAgent(project, sub)))
       child.addEventListener('contextmenu', event =>
         popMenu(event, [
-          sub.isTask ? ['Open its chat', () => void select(project.id)] : ['See what it did', () => void openAgent(project, sub)],
+          ...(sub.isTask ? [['See what it did', () => void openTask(project, sub)], ['Open its chat', () => void select(project.id)]] : [['See what it did', () => void openAgent(project, sub)]]),
           ...(canStop ? [[sub.isTask ? 'Stop it' : 'Stop this agent', () => void stopIt()]] : []),
           ...(isOver ? [['Take it off the list', drop]] : []),
           ['Clear finished agents', clearAgents],
@@ -2874,6 +2897,108 @@ let agentTimer = 0
  * given, its thinking, each tool call and what came back, and its report.
  * While the agent works the page follows it.
  */
+/**
+ * What a background command (or workflow, or monitor) is doing or did, in the
+ * agents' window: the command Claude ran, the engine's summary once it ended,
+ * and the end of what it printed. Follows it while it runs.
+ */
+const openTask = async (project, sub) => {
+  if (agentSheet === null) {
+    agentSheet = el('dialog', 'sheet file-sheet agent-sheet')
+    document.body.append(agentSheet)
+    agentSheet.addEventListener('click', event => {
+      if (event.target === agentSheet) {
+        agentSheet.close()
+      }
+    })
+    agentSheet.addEventListener('close', () => clearInterval(agentTimer))
+  }
+
+  clearInterval(agentTimer)
+  const head = el('div', 'file-head')
+  const title = el('div', 'agent-title')
+  const state = el('small', '', '')
+  title.append(el('b', '', sub.name), state)
+  const close = el('button', 'pill go', 'Close')
+  close.type = 'button'
+  close.addEventListener('click', () => agentSheet.close())
+  head.append(title, close)
+  const body = el('div', 'agent-body')
+  body.tabIndex = 0
+  body.append(el('div', 'empty', 'Reading what it did...'))
+  agentSheet.replaceChildren(head, body)
+
+  if (!agentSheet.open) {
+    agentSheet.showModal()
+  }
+
+  // The command itself is in the chat: the tool call that started it.
+  const input = project.tools.get(sub.id)?.part.input
+  const command = String(input?.command ?? input?.script ?? '')
+  let drawn = ''
+  const fill = async () => {
+    const got = isDemo
+      ? {
+          kind: sub.kind,
+          status: sub.status === 'working' ? 'working' : 'completed',
+          summary: sub.status === 'working' ? '' : 'The command finished with exit code 0.',
+          started: Date.now() - 95000,
+          ended: sub.status === 'working' ? 0 : Date.now() - 5000,
+          output: 'tests 42\npass 42\nfail 0\n',
+          isCut: false,
+        }
+      : await call('task:read', project.id, sub.id)
+
+    if (!agentSheet.open || !body.isConnected) {
+      return
+    }
+
+    if (!got || got.error) {
+      body.replaceChildren(el('div', 'empty', got?.error ?? 'What this did could not be read.'))
+
+      return
+    }
+
+    const isGoing = got.status === 'working'
+    state.textContent = [
+      got.kind,
+      isGoing ? 'working' : got.status === 'completed' ? 'finished' : got.status,
+      got.started > 0 ? howLong((isGoing ? Date.now() : got.ended) - got.started) : '',
+      got.isCut ? 'the end of its output' : '',
+    ]
+      .filter(Boolean)
+      .join('  \u00b7  ')
+    const key = `${got.status}|${got.summary}|${got.output.length}`
+
+    if (key === drawn) {
+      return
+    }
+
+    const wasAtEnd = drawn === '' || body.scrollHeight - body.scrollTop - body.clientHeight < 40
+    drawn = key
+    const part = (label, text) => {
+      const box = el('div', 'task-part')
+      box.append(el('div', 'task-label', label), el('pre', 'file-text task-text', text))
+
+      return box
+    }
+    body.replaceChildren(
+      ...(command ? [part('Command', command)] : []),
+      ...(got.summary ? [part('Result', got.summary)] : []),
+      got.output.trim() !== '' ? part(isGoing ? 'Output so far' : 'Output', got.output) : el('div', 'empty', isGoing ? 'It has not printed anything yet.' : 'It printed nothing.'),
+    )
+
+    if (wasAtEnd) {
+      body.scrollTop = body.scrollHeight
+    }
+  }
+  await fill()
+
+  if (sub.status === 'working' && !isDemo) {
+    agentTimer = setInterval(() => void fill(), 3000)
+  }
+}
+
 /** A length of time in a few words: 40 s, 12 min, 1 h 5 min. */
 const howLong = ms => {
   const seconds = Math.max(0, Math.round(ms / 1000))
@@ -2912,6 +3037,8 @@ const openAgent = async (project, sub) => {
   const body = el('div', 'agent-body')
   body.tabIndex = 0
   body.append(el('div', 'empty', 'Reading what the agent did...'))
+  // Pictures the agent looked at or made open large, as in the chat.
+  picturesOpen(body)
   agentSheet.replaceChildren(head, body)
 
   if (!agentSheet.open) {
@@ -2931,7 +3058,7 @@ const openAgent = async (project, sub) => {
           events: [
             { t: 'user', text: 'Check the contrast of the status badges in both themes and report any that are hard to read.' },
             { t: 'assistant', isMain: true, blocks: [{ type: 'thinking', text: 'Find the badge colours first, then compare each with its background.' }, { type: 'tool_use', id: 'a1', name: 'Grep', input: { pattern: 'badge', path: 'src' } }] },
-            { t: 'tool_result', id: 'a1', isMain: true, text: 'src/sidebar.tsx:12: <StatusBadge status={status} />' },
+            { t: 'tool_result', id: 'a1', isMain: true, text: 'src/sidebar.tsx:12: <StatusBadge status={status} />', pictures: [new URL('brand/icon.png', location.href).href] },
             { t: 'assistant', isMain: true, blocks: [{ type: 'text', text: 'All four badges pass in the dark theme. In the light theme the amber one is hard to read.' }] },
           ],
         }
@@ -6163,12 +6290,7 @@ const queuePaint = () => {
 
 const wire = () => {
   // Any picture in the chat opens in the picture viewer, over the window, and not inside the chat.
-  $('chat').addEventListener('click', event => {
-    if (event.target instanceof HTMLImageElement && event.target.naturalWidth > 0) {
-      event.preventDefault()
-      viewPicture(event.target.src, event.target.alt)
-    }
-  })
+  picturesOpen($('chat'))
   const input = $('input')
   // The box grows with what is written, up to a little under half the window.
   const fit = () => {

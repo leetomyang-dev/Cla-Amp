@@ -310,6 +310,11 @@ with a "working" badge until it ends, and is counted in the running
 number in the status bar, so you can see before closing whether
 anything is still going.
 
+Click a background command's row to see what it did: the command
+itself, how it ended, how long it took and the end of what it printed.
+While it is still running the window follows its output. This is kept
+until Cla-Amp closes; after that the result is in the chat.
+
 To stop one of them without stopping the chat, point at its row and
 press the small square (**■**), or right-click the row and choose
 **Stop it** (**Stop this agent** for an agent). It asks first. The

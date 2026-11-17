@@ -425,6 +425,9 @@ body.no-right #right, body.no-right .splitter[data-side='right'] { display: none
 .pic-bar span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pic-stage { flex: 1; min-height: 0; display: flex; overflow: auto; padding: 12px; cursor: zoom-out; }
 .pic-stage img { margin: auto; max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-in; border-radius: 4px; }
+/* Shown over an open sheet it is a popover: the browser's own box for those is taken off. */
+.pic-view:popover-open { width: auto; height: auto; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; color: inherit; overflow: visible; }
+.agent-body .tool-pics img { cursor: zoom-in; }
 .pic-view.real .pic-stage img { max-width: none; max-height: none; cursor: zoom-out; }
 #chat img { cursor: zoom-in; }
 /* Play buttons for videos a reply names. */
@@ -1170,6 +1173,10 @@ html:not([lang="en"]) .tab, html:not([lang="en"]) .seg-btn { padding-inline: 4px
 /* What an agent did: a chat of its own, in a sheet. */
 .agent-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; user-select: text; }
 .agent-body .msg-actions { display: none; }
+/* A background command's window: its command, result and output, each under a small label. */
+.task-part { margin-bottom: 14px; }
+.task-label { margin-bottom: 4px; color: var(--dim); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
+.task-text { padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-title { flex: 1; min-width: 160px; display: flex; flex-direction: column; overflow: hidden; }
 .agent-title small { color: var(--dim); font-size: 11px; }
 /* Stay awake, on: lit like a switch that is on. */
