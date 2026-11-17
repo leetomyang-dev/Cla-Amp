@@ -141,6 +141,25 @@ cookies, passwords or profile. Nothing about the sign-in passes through it.
 The music deck only sees what Windows reports as playing, and its buttons
 are Windows' own media controls.
 
+### Closing Cla-Amp stops its own browsers
+
+When Cla-Amp closes, the browsers it started are stopped with it, so no
+player plays on and nothing of Cla-Amp's stays in Task Manager. They are
+stopped outright, not asked to close (a player that is playing answers a
+polite close with a "Leave app?" box of its own and stays open).
+
+Which browsers: only a Chrome, Edge or Brave whose command line names one
+of Cla-Amp's own profile folders (`player-profile` or `pages-profile` in
+`%APPDATA%\Cla-Amp`). Your everyday browser runs on another profile and is
+never matched; this was measured on a computer with other browsers open,
+and none of their processes was touched. The work is done by
+`deck/close-browsers.ps1`, started by full path with fixed arguments, and
+it writes what it found (a time and a count, no title or address) to
+`%APPDATA%\Cla-Amp\last-close.log`. A restart of Cla-Amp leaves the
+player playing. When Cla-Amp starts and finds a browser of its own still
+running, it takes its windows back; it never adopts a window of any other
+browser.
+
 ### One source at a time
 
 When one player starts, the music helper pauses the others through Windows'
@@ -230,6 +249,15 @@ set and the app runs from its source folder.
   the program, **Update.bat** is a script the person runs by hand: it
   downloads Cla-Amp's newest version from its GitHub page over HTTPS and
   copies it over the folder. Cla-Amp never runs it.
+- **Stay awake**, while switched on, asks Windows not to sleep by itself.
+  Nothing else about power is changed, and it ends with the app.
+- When a chat is done or waits for you, the taskbar button may flash and a
+  chime may sound. The chime is made in the window from plain tones: there
+  is no sound file, and nothing is fetched.
+- What an agent of a chat did is read, on your click, from Claude Code's
+  own saved file for that chat. Read only.
+- Your plan's limits and extra usage credits are asked of Claude Code, as
+  the Usage panel always did. Cla-Amp shows the figures and keeps none.
 - Listens on no port, on this computer or the network.
 - Claude Code talks to Anthropic as it always does. The players and
   claude.ai are the services' own pages in your browser and talk to their
@@ -246,14 +274,24 @@ set and the app runs from its source folder.
 - Sign in was run after the rewrite and the sign-in completed, but nobody
   watched the console window itself. The connector console (for a connector
   that is not from the Claude account) has not been clicked through.
+- The helper scripts run hidden in Windows PowerShell and one of them
+  stops browser processes: an antivirus program may ask about that. See
+  [SECURITY.md](../SECURITY.md).
+- Closing the app with its own browser behind it, and taking a left-over
+  browser back at the start, were proven on a scratch browser, not yet
+  watched with a real player.
 - The app is not code-signed or packaged. Before handing out an installer:
   package it, sign it, and switch off Electron's run-as-Node and inspect
   fuses.
 
 ## Rules for anyone changing the code
 
-1. Untrusted text goes on screen with `textContent`. The only `innerHTML` is
-   in `markdown()`, behind `DOMPurify` with `CLEAN`. Do not add another.
+1. Untrusted text goes on screen with `textContent`. Untrusted text becomes
+   HTML in two places only, both behind `DOMPurify` with `CLEAN`:
+   `markdown()` in `renderer/app.js` and the guide page in
+   `renderer/guides.js`. The other uses of `innerHTML` are code colouring
+   by highlight.js, which escapes what it is given, and fixed drawings
+   written in the code. Do not add another kind.
 2. A new call gets a name in `preload.cjs` and a handler that checks every
    argument's type, range or pattern. Treat the window as hostile.
 3. Never build a command line or a script file from text. Start programs by
@@ -262,11 +300,23 @@ set and the app runs from its source folder.
    asked in a system dialog from the main process, not in the page.
 5. Do not loosen the content policy in `index.html` or the request block in
    `main.mjs`.
-6. Run `npm audit` before a release and keep Electron current.
+6. Run `npm audit` before a release and keep Electron current. The same
+   runs on GitHub on every push (`.github/workflows/checks.yml`), with
+   CodeQL (`codeql.yml`) and Dependabot (`.github/dependabot.yml`).
+7. A process is stopped only when it is Cla-Amp's own: found by this app's
+   own profile folder in its command line, never by name alone.
+8. No program file (`.exe`, `.dll` and the like) goes into the repository;
+   the check on every push refuses one.
 
 ## How this was checked
 
-- `npm audit`: no known vulnerabilities (15 November 2026).
+- `npm audit`: no known vulnerabilities (16 November 2026).
+- The code searched for `eval`, `new Function`, a shell started from text
+  and every `innerHTML`: none of the first three; the `innerHTML` uses are
+  the ones named in rule 1.
+- The browser clean-up run against a scratch browser with its own profile,
+  with other browsers open: the scratch browser's 13 processes were gone,
+  and the 19 other browser processes on the computer were untouched.
 - Hostile markup drawn through the chat's own code in the demo: nothing ran,
   only the plain web link survived.
 - Bad arguments sent to the real app's calls (a path trick, an unknown chat,
@@ -277,7 +327,7 @@ set and the app runs from its source folder.
 
 ## Reporting a problem
 
-Open an issue on the project's GitHub page with what you did and what happened. Issues are public, so for a security problem say only that you have one to report and leave out the details of how to use it.
+Open an issue on the project's GitHub page with what you did and what happened. Issues are public, so a security problem goes another way: [SECURITY.md](../SECURITY.md) says how to report one privately.
 
 Cla-Amp is shared as it is, with no promise of support.
 

@@ -1,0 +1,14 @@
+# Tells the project when something it is built with has a newer version or a
+# reported vulnerability, as a pull request to look at. Nothing is changed
+# without a person agreeing to it.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

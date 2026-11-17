@@ -1,0 +1,35 @@
+# Runs on every push and pull request: the tests, and a look for known
+# vulnerabilities in what the app is built with. Read-only: it changes nothing.
+name: Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Once a week too, so a newly reported vulnerability shows up without a push.
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests and dependency audit
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # Exactly the versions in package-lock.json; no install scripts are run.
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - name: Known vulnerabilities in dependencies
+        run: npm audit --audit-level=moderate
+      - name: No program files in the repository
+        shell: bash
+        run: |
+          found=$(git ls-files | grep -iE '\.(exe|dll|msi|scr|com|jar)$' || true)
+          if [ -n "$found" ]; then echo "Program files found:"; echo "$found"; exit 1; fi

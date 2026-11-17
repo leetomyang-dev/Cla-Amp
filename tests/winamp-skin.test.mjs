@@ -101,7 +101,8 @@ assert.equal(made.css.split('}').length, 2)
 assert.equal(JSON.parse(made.json).name, 'My Cool Skin v2')
 
 // The stylesheet must pass the app's own check as "colours", so it loads without a question.
-const source = fs.readFileSync(new URL('../main.mjs', import.meta.url), 'utf8')
+// Read with plain line ends: a checkout on Windows may have turned them into CRLF.
+const source = fs.readFileSync(new URL('../main.mjs', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 const from = source.indexOf('const checkSkin = css => {')
 const checkSkin = new Function(`${source.slice(from, source.indexOf('\n}\n', from) + 3)}; return checkSkin`)()
 assert.equal(checkSkin(made.css).kind, 'colours')

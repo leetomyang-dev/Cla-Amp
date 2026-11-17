@@ -1,5 +1,8 @@
 # Cla-Amp
 
+[![Checks](https://github.com/leetomyang-dev/Cla-Amp/actions/workflows/checks.yml/badge.svg)](https://github.com/leetomyang-dev/Cla-Amp/actions/workflows/checks.yml)
+[![CodeQL](https://github.com/leetomyang-dev/Cla-Amp/actions/workflows/codeql.yml/badge.svg)](https://github.com/leetomyang-dev/Cla-Amp/actions/workflows/codeql.yml)
+
 A retro music-player-style workspace that runs Claude Code. You chat with
 Claude about the files in a folder while your music plays in the same window.
 
@@ -169,6 +172,25 @@ What signing in involves:
 
 The privacy page: [docs/privacy.md](docs/privacy.md). How it is kept safe,
 including known limits: [docs/security.md](docs/security.md).
+
+## Is it safe to run?
+
+You do not have to take anyone's word for it:
+
+- **It is source code.** No installer and no program file of Cla-Amp's own:
+  what runs is the text in this repository, on Electron and packages pinned
+  to exact versions.
+- **Every push is checked in public**: the tests, a search for known
+  vulnerabilities in the packages, and GitHub's code scanner. The two badges
+  at the top of this page show how the last run went.
+- **What it does on your computer is written down**, including the parts an
+  antivirus program might ask about (hidden PowerShell helper scripts,
+  listening to the speakers for the spectrum, stopping its own browser
+  windows when it closes): [SECURITY.md](SECURITY.md).
+
+Get it only from this page. It is not code-signed, and no one can promise
+any program is free of faults; if you find one, [SECURITY.md](SECURITY.md)
+says how to report it privately.
 
 ## Licence
 
