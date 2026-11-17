@@ -203,7 +203,9 @@ To get a newer version later, close Cla-Amp and double-click **Update.bat** in t
   numbers, today in numbers), every other panel of the side columns,
   and the parts of the status bar.
 - Right-click a panel, or a part of the status bar, and pick **Hide** to
-  put it away. Tick it again under **Widgets** to bring it back. Boxes
+  put it away. Tick it again under **Widgets** to bring it back. A side
+  column with nothing left on show in it is put away too, and returns
+  when you show something in it again. Boxes
   you type in and the spectrum keep their own right-click.
 - Every panel can be folded by clicking its heading and moved by dragging
   its heading.

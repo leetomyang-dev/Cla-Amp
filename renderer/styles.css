@@ -1067,3 +1067,11 @@ body.fx-beat .titlebar-name { text-shadow: 0 0 calc(var(--beat, 0) * 12px) var(-
 /* Screen lines: an old monitor's faint lines over the whole window. Clicks pass through. */
 body.fx-lines::after { content: ''; position: fixed; inset: 0; z-index: 70; pointer-events: none; background: repeating-linear-gradient(to bottom, rgba(0, 0, 0, 0.2) 0 1px, transparent 1px 3px); }
 .spec-sub { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line); display: flex; flex-direction: column; }
+/* A side column with nothing on show in it is put away with its divider
+   (see putColumns); while arranging it stays, as a place to drop things. */
+body:not(.arranging).r2-empty #right2, body:not(.arranging).r2-empty .splitter[data-side='right2'] { display: none; }
+body:not(.arranging).r1-empty #right, body:not(.arranging).r1-empty .splitter[data-side='right'] { display: none; }
+body:not(.arranging).side-tall.col2.r2-empty { --side-w: var(--right); }
+body:not(.arranging).side-tall.col2.r2-empty #right { right: 10px; }
+body:not(.arranging).side-tall.panels-left.col2.r2-empty #right { right: auto; left: 10px; }
+body:not(.arranging).side-tall.col2.r1-empty { --side-w: var(--r2); }

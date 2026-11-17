@@ -4382,6 +4382,21 @@ const putGone = () => {
   localStorage.setItem('hiddenPanels', JSON.stringify([...gonePanels]))
 }
 
+/**
+ * A side column with nothing on show in it is put away with its divider, and
+ * comes back when something in it is shown again. With both empty the whole
+ * side goes, as the title bar's button for it would do.
+ */
+const putColumns = () => {
+  const isEmpty = id => ![...$(id).children].some(one => !one.matches('.hidden, .gone'))
+  const hasSecond = document.body.classList.contains('col2')
+  const firstEmpty = isEmpty('right')
+  const secondEmpty = !hasSecond || isEmpty('right2')
+  document.body.classList.toggle('r1-empty', firstEmpty && !secondEmpty)
+  document.body.classList.toggle('r2-empty', hasSecond && secondEmpty && !firstEmpty)
+  document.body.classList.toggle('no-right', localStorage.getItem('hide-right') === '1' || (firstEmpty && secondEmpty))
+}
+
 /** A small menu at the mouse: each row a thing to do; `note` is a line of small print under them. */
 const popMenu = (event, rows, note = '') => {
   event.preventDefault()
@@ -4545,6 +4560,18 @@ setInterval(() => {
 const wireWidgets = () => {
   showWidgets()
   putGone()
+  // Whatever shows, hides or moves a panel, the columns follow: looked at once after each batch of changes.
+  let columnsTimer = null
+  const columnsChanged = new MutationObserver(() => {
+    clearTimeout(columnsTimer)
+    columnsTimer = setTimeout(putColumns, 30)
+  })
+
+  for (const id of ['right', 'right2']) {
+    columnsChanged.observe($(id), { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] })
+  }
+  new MutationObserver(putColumns).observe(document.body, { attributes: true, attributeFilter: ['class'] })
+  putColumns()
 
   // Right-click a panel to put it away. Boxes to type in, and parts with a menu of their own, keep theirs.
   for (const panel of document.querySelectorAll('.cols .panel')) {
