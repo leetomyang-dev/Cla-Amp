@@ -41,6 +41,26 @@ To get a newer version later, close Cla-Amp and double-click **Update.bat** in t
   ones) or **Plan** (only plans). **Stop** halts Claude while it is working.
 - When Claude wants to run a command or change a file, a card asks you.
   **Always allow** remembers your answer for that kind of action.
+- Under a finished reply, a card stands for each artifact it links and
+  each document it wrote or names: click the card to open it.
+- The **In this chat** panel gathers what the chat has named, the
+  newest first: artifacts, documents (Markdown, text, PDF, pages and
+  the like), the files Claude changed, and web links. Click one to open
+  it; right-click a file for its folder, or a link to copy it.
+- A file's name in a reply is a link: click it to view the file in the
+  window. Right-click it for **Show in folder**, **View the file**,
+  **Copy path**, and for a page or a PDF **Open in browser**.
+- A command Claude ran shows as a small terminal: the command in its
+  colours behind a prompt (hover for **Copy**), then what it printed.
+  Long output shows its first lines with **Show all lines**; a command
+  that failed has a red edge.
+- The chat follows a reply as it arrives. Scroll up, even a little, and it
+  stays where you are; **Latest** at the foot of the chat goes back to the
+  newest message and follows again.
+- A file Claude read shows as code: its name (a link), which lines, and
+  the lines with their numbers in a margin and the code in its colours.
+  Other tools show what they were asked as short rows, and what they
+  gave back below, long results folded.
 - When Claude changes a file, the card shows the change line by line:
   lines taken out in red with a minus, lines put in in green with a
   plus, the code in its colours, and a count such as +12 −3. The same
@@ -120,6 +140,14 @@ To get a newer version later, close Cla-Amp and double-click **Update.bat** in t
   whichever block you point at. Panels go in columns; the rest go
   anywhere. **Done** ends it, **Put everything back** returns to the
   usual arrangement. A saved theme keeps the arrangement.
+- **Language** (at the top of the **Widgets** menu) puts the window's
+  own words in another language: German, Spanish, French, Hindi,
+  Indonesian, Italian, Japanese, Korean, Brazilian Portuguese, Simplified
+  or Traditional Chinese. **Same as Windows** follows your computer. The
+  translations were made by machine and may be rough in places; anything
+  not translated shows in English. Your messages, Claude's replies, code
+  and the guides stay as they were written, and message boxes drawn by
+  Windows keep their English buttons.
 - **Text** (under **Widgets**, **Layout**) changes the typeface of the
   window's text. The list has typefaces that come with Windows and, when
   they are installed on your computer, free open-source ones: Inter,
@@ -211,6 +239,45 @@ To get a newer version later, close Cla-Amp and double-click **Update.bat** in t
   its heading.
 - Tick **A second column** in the Widgets menu to get another column, then
   drag panels into it.
+
+## Picking up where you left off
+
+Close Cla-Amp and open it again, and it comes back as you left it: the
+window's size and place (and whether it filled the screen), the project
+and chat that were open, the tab on the left, where you were reading in
+each chat, and any message you had typed but not sent. A chat you were
+following to its end opens at its end. If the screen the window was on is
+gone, it opens on the one you have.
+
+## Easier to see, hear and reach
+
+- **Size.** Hold Ctrl and press + or - to make everything in the window
+  larger or smaller; Ctrl and 0 puts it back. The same choice is under
+  **Widgets**, **Size**. It is kept for next time.
+- **Calm.** Under **Widgets**, **Calm** keeps the window still: the
+  spectrum rests, nothing glows, slides or blinks. Left at **Same as
+  Windows**, it follows Windows' own setting (Settings, Accessibility,
+  Visual effects, Animation effects).
+- **High Contrast.** A skin for easy reading: white and yellow on black
+  with strong edges. Pick it under **Themes**. Windows' own contrast
+  themes are respected too.
+- **Readable typefaces.** **Widgets**, **Text** lists the typefaces on
+  your computer, among them Atkinson Hyperlegible and OpenDyslexic when
+  you have installed them.
+- **Keyboard.** Tab reaches everything that can be clicked, and what has
+  the focus shows an outline. Enter or Space presses it. The menu key
+  (or Shift and F10) opens the right-click menu of what has the focus;
+  the arrows move in it and Escape closes it. A panel's menu has **Move
+  up**, **Move down** and **Move to the other column**, so nothing needs
+  dragging. Tab to a divider between columns and the left and right
+  arrows make the column wider or narrower. With the focus in the chat,
+  the arrows and Page Up and Page Down scroll it.
+- **Screen readers.** A screen reader is told when Claude finishes a
+  reply and when Claude asks to use a tool. Tabs, switches and folded
+  panels say what they are and whether they are on or open.
+
+Not there yet: the song columns and the Arrange mode still need a mouse,
+and a screen reader does not read a reply aloud as it arrives.
 
 ## Looks: skins and themes
 

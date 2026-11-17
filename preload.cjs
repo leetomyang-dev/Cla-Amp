@@ -88,6 +88,7 @@ const CALLS = new Set([
   'music:remove',
   'music:playlist',
   'music:unlist',
+  'zoom:set',
   'music:scan',
   'deck:cmd',
   'prefs:set',

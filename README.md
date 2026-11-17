@@ -8,9 +8,11 @@ endorsed by Anthropic, by the makers of Winamp, by Spotify, by Google or
 YouTube, or by Microsoft. Claude and Claude Code are Anthropic's; Cla-Amp only
 runs Claude Code, unchanged, on your computer.
 
-![The Cla-Amp window in demo mode, with made-up projects and songs](docs/pictures/cla-amp.png)
+![Cla-Amp at work in demo mode: the spectrum moving, Claude running a command and changing a file, cards for what it made, the Widgets menu, and a change of skin](docs/pictures/cla-amp-demo.webp)
 
-![A short tour: the Widgets menu, the status bar's parts, hiding a panel, arranging the window, another skin](docs/pictures/cla-amp-tour.webp)
+The same window, still (made-up projects and songs):
+
+![The Cla-Amp window in demo mode](docs/pictures/cla-amp.png)
 
 Windows only for now.
 
@@ -37,6 +39,11 @@ Windows only for now.
 - **Arrange it your way.** Drag panels and whole sections of the window
   about, hide what you do not use with a right-click, choose what the status
   bar and the song list show, and save the lot as a theme.
+- **Made to be reachable.** Everything by keyboard, a size control, a
+  Calm setting that stops all movement, a High Contrast skin, and words
+  for screen readers.
+- **Use it in your language.** The window's own words come in twelve
+  languages (machine-translated; English where a piece is missing).
 - **Change the program itself by asking.** Cla-Amp is its own source code:
   add its folder as a project and tell Claude what you want changed.
 
@@ -105,7 +112,8 @@ npm start
 ```
 
 `npm run demo` opens the window with made-up projects and no Claude Code
-behind it, to look at the layout or try a skin.
+behind it, to look at the layout. It shows nothing of yours (no account,
+chats, settings, themes or music) and changes nothing you keep.
 
 ## Sign in, and what that involves
 

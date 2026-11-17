@@ -6,9 +6,11 @@ import DOMPurify from '../node_modules/dompurify/dist/purify.es.mjs'
 import { marked } from '../node_modules/marked/lib/marked.esm.js'
 
 import { openAbout } from './about.js'
+import { announce, asKey, calmChoice, setCalm, setSize, sizeNow, SIZES } from './access.js'
 import { dayKey, drawCalendar, notePeak, noteToday } from './calendar.js'
 import { buildEqualizer, tuner } from './equalizer.js'
 import { openGuides } from './guides.js'
+import { LANGS, langChoice, setLang } from './lang.js'
 import { openLook, startLook } from './look.js'
 import { openThemes } from './themes.js'
 import { openSettings } from './settings.js'
@@ -805,11 +807,79 @@ const viewPicture = (src, name = '') => {
   shut.focus()
 }
 
+/** The folders this chat's tools have worked in, the most used first: where a short name in a reply may belong. */
+const workFolders = () => {
+  const count = new Map()
+
+  for (const item of active()?.items ?? []) {
+    for (const part of item.kind === 'assistant' ? item.parts : []) {
+      const file = part.input?.file_path ?? part.input?.notebook_path
+
+      if (typeof file !== 'string' || !/^([a-z]:[\\/]|\/)/i.test(file)) {
+        continue
+      }
+
+      const bits = file.replace(/\\/g, '/').split('/')
+
+      // The file's own folder and a few above it.
+      for (let n = bits.length - 1; n >= 2 && n >= bits.length - 6; n -= 1) {
+        const folder = bits.slice(0, n).join('/')
+        count.set(folder, (count.get(folder) ?? 0) + 1)
+      }
+    }
+  }
+
+  return [...count].sort((a, b) => b[1] - a[1]).slice(0, 16).map(([folder]) => folder)
+}
+
+const NOT_FOUND = 'That file was not found.'
+const foundFiles = new Map()
+
+/**
+ * Reads a file a reply names. A short name is first looked for in the
+ * project's folder; when Claude was working in a folder inside it (or in
+ * another one), the name is tried in the folders this chat's tools have
+ * used. Gives { name, got }: the name that worked, and what was read.
+ */
+const findFile = async name => {
+  const id = activeId
+  const key = `${id}\n${name}`
+  const first = await call('file:view', id, foundFiles.get(key) ?? name)
+
+  if (!first || first.error !== NOT_FOUND || /^([a-z]:[\\/]|[\\/]|file:)/i.test(name)) {
+    return { name: foundFiles.get(key) ?? name, got: first }
+  }
+
+  for (const folder of workFolders()) {
+    const full = `${folder}/${name.replace(/^\.[\\/]/, '')}`
+    const got = await call('file:view', id, full)
+
+    if (got && got.error !== NOT_FOUND) {
+      foundFiles.set(key, full)
+
+      return { name: full, got }
+    }
+  }
+
+  return { name, got: first }
+}
+
 /** Makes a name in a reply open the file viewer when clicked. */
 const asFileLink = (node, name) => {
   node.classList.add('file-link')
-  node.title = `${name}\nClick to view this file`
+  node.title = `${name}\nClick to view this file. Right-click to show it in its folder.`
   node.tabIndex = 0
+  // Right-click: the things to do with the file, without opening it first.
+  node.addEventListener('contextmenu', event => {
+    event.stopPropagation()
+    const id = activeId
+    popMenu(event, [
+      ['Show in folder', () => void findFile(name).then(found => (found.got?.error === NOT_FOUND ? alert(NOT_FOUND) : call('file:reveal', id, found.name)))],
+      ['View the file', () => void openFile(name)],
+      ...(/\.(html?|pdf|svg)$/i.test(name.replace(/[#?].*$/, '')) ? [['Open in browser', () => void findFile(name).then(found => call('file:browser', id, found.name))]] : []),
+      ['Copy path', () => void findFile(name).then(found => navigator.clipboard.writeText(found.name))],
+    ])
+  })
   node.setAttribute('role', 'button')
   node.addEventListener('click', event => {
     event.preventDefault()
@@ -817,6 +887,7 @@ const asFileLink = (node, name) => {
   })
   node.addEventListener('keydown', event => {
     if (event.key === 'Enter') {
+      event.preventDefault()
       void openFile(name)
     }
   })
@@ -832,7 +903,7 @@ let fileSheet = null
  */
 const openFile = async name => {
   const id = activeId
-  const got = isDemo ? { name, file: name, kind: 'markdown', text: `# ${name}\n\nThis is the **demo**: a real file would be shown here.\n\n- one\n- two\n`, size: 60 } : await call('file:view', id, name)
+  const got = isDemo ? { name, file: name, kind: 'markdown', text: `# ${name}\n\nThis is the **demo**: a real file would be shown here.\n\n- one\n- two\n`, size: 60 } : (await findFile(name)).got
 
   if (!got || got.error) {
     alert(got?.error ?? 'That file could not be read.')
@@ -1232,7 +1303,7 @@ const paintActions = item => {
       project.items.push({ kind: 'note', text: 'Forked: this is a new chat that holds the old one up to the reply you chose. The chat you forked from is unchanged and still in the Code tab.' })
       openChatId = opened.forkId ?? openChatId
       renderChat()
-      $('chat').scrollTop = $('chat').scrollHeight
+      goToEnd()
       void loadChats()
     })
   }
@@ -1502,6 +1573,444 @@ const paintFiles = item => {
   return box
 }
 
+// ---- "In this chat": what the chat has named, gathered in one panel.
+const DOC_END = /\.(md|markdown|txt|pdf|html?|docx?|csv|xlsx?|pptx?)$/i
+/** Two names (forward slashes, small letters) for one file: alike, or one is the tail of the other. */
+const isSameFile = (a, b) => a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`)
+const isArtifactLink = url => {
+  try {
+    const at = new URL(url)
+
+    return (at.hostname === 'claude.ai' && /^\/(public\/)?artifacts?\//.test(at.pathname)) || at.hostname === 'claude.site' || at.hostname.endsWith('.claude.site')
+  } catch {
+    return false
+  }
+}
+/** What one message names. Kept with the message, and read again only while it is still being written. */
+const refsKept = new WeakMap()
+const refsOf = (item, isLive) => {
+  const size = item.kind === 'assistant' ? item.parts.length : 0
+  const kept = refsKept.get(item)
+
+  if (kept && !isLive && kept.size === size) {
+    return kept.refs
+  }
+
+  const refs = { links: [], docs: [], changed: [], onlyRead: [] }
+  const takeText = text => {
+    const words = String(text ?? '').slice(0, 200000)
+    const named = new Set()
+
+    // Named links first, so a web address keeps the words it was given.
+    for (const [, label, target] of words.matchAll(/\[([^\]\n]{1,200})\]\(([^)\s]{1,2000})\)/g)) {
+      if (/^https?:\/\//i.test(target)) {
+        named.add(target)
+        refs.links.push({ url: target, label })
+      } else if (!target.startsWith('#') && !/^[a-z][a-z0-9+.-]*:/i.test(target.replace(/^[a-z]:[\\/]/i, ''))) {
+        // A name written with %20 and the like is read as the file's real name.
+        let file = target
+
+        try {
+          file = decodeURIComponent(target)
+        } catch {
+          // Not such a name: taken as written.
+        }
+        refs.docs.push(file)
+      }
+    }
+
+    for (const [found] of words.matchAll(/https?:\/\/[^\s<>"'`)\]]{4,2000}/gi)) {
+      const url = found.replace(/[.,;:!?]+$/, '')
+
+      if (!named.has(url)) {
+        refs.links.push({ url, label: '' })
+      }
+    }
+
+    // A document named in code marks, such as `docs/plan.md`.
+    for (const [, name] of words.matchAll(/`([^`\n]{3,260})`/g)) {
+      if (DOC_END.test(name) && FILE_NAME.test(name.trim())) {
+        refs.docs.push(name.trim())
+      }
+    }
+  }
+
+  if (item.kind === 'user') {
+    takeText(item.text)
+  } else if (item.kind === 'assistant') {
+    for (const part of item.parts) {
+      const input = part.input ?? {}
+
+      if (part.type === 'text') {
+        takeText(part.text)
+      } else if (part.type === 'tool' && typeof input.file_path === 'string' && !part.isError) {
+        if (['Edit', 'Write', 'NotebookEdit'].includes(part.name)) {
+          refs.changed.push(input.file_path)
+        }
+
+        if (DOC_END.test(input.file_path)) {
+          refs.docs.push(input.file_path)
+
+          // A document Claude only looked at is listed in the panel, but gets no card under the reply.
+          if (part.name === 'Read') {
+            refs.onlyRead.push(input.file_path)
+          }
+        }
+      } else if (part.type === 'tool' && typeof input.url === 'string' && /^https?:\/\//i.test(input.url)) {
+        refs.links.push({ url: input.url, label: '' })
+      }
+    }
+  }
+  refsKept.set(item, { size, refs })
+
+  return refs
+}
+
+const DOC_KIND = { md: 'Markdown', markdown: 'Markdown', txt: 'Text', pdf: 'PDF', html: 'Web page', htm: 'Web page', doc: 'Word document', docx: 'Word document', csv: 'Table', xls: 'Spreadsheet', xlsx: 'Spreadsheet', ppt: 'Slides', pptx: 'Slides' }
+
+/**
+ * The cards under a finished reply: one for each artifact it links and each
+ * document it wrote or names, with what it is and a click to open it.
+ */
+const paintCards = item => {
+  const refs = refsOf(item, true)
+  const cards = []
+  const seen = new Set()
+
+  for (const link of refs.links) {
+    if (isArtifactLink(link.url) && !seen.has(link.url)) {
+      seen.add(link.url)
+      let host = 'claude.ai'
+
+      try {
+        host = new URL(link.url).hostname
+      } catch {
+        // Kept as claude.ai.
+      }
+      cards.push({ mark: '\u2726', kind: 'art', title: link.label || 'Artifact', note: `Artifact \u00b7 ${host}`, open: () => window.open(link.url), tip: link.url })
+    }
+  }
+
+  for (const file of refs.docs) {
+    const key = file.replace(/\\/g, '/').toLowerCase()
+    const isOnlyRead = refs.onlyRead.includes(file) && refs.docs.filter(one => one === file).length === 1
+
+    if ([...seen].some(one => isSameFile(one, key)) || isOnlyRead) {
+      continue
+    }
+
+    seen.add(key)
+    const end = (/\.([a-z0-9]+)$/i.exec(file)?.[1] ?? '').toLowerCase()
+    const isMade = refs.changed.includes(file)
+    cards.push({ mark: end.slice(0, 4).toUpperCase() || 'FILE', kind: 'doc', title: baseName(file), note: `${DOC_KIND[end] ?? 'File'}${isMade ? ' \u00b7 written in this reply' : ''}`, file, tip: file })
+  }
+
+  if (cards.length === 0) {
+    return ''
+  }
+
+  const box = el('div', 'ref-cards')
+
+  for (const card of cards.slice(0, 8)) {
+    const one = el('div', `ref-card ${card.kind}`)
+    const words = el('div', 'ref-card-words')
+    words.append(el('b', '', card.title), el('small', '', card.note))
+    one.append(el('span', 'ref-card-mark', card.mark), words)
+    one.title = card.tip
+
+    if (card.file) {
+      // The same click and right-click as a file's name in a reply.
+      asFileLink(one, card.file)
+      one.classList.remove('file-link')
+    } else {
+      one.tabIndex = 0
+      one.setAttribute('role', 'button')
+      one.addEventListener('click', card.open)
+      one.addEventListener('contextmenu', event => popMenu(event, [['Open the artifact', card.open], ['Copy the link', () => void navigator.clipboard.writeText(card.tip)]]))
+    }
+    box.append(one)
+  }
+
+  if (cards.length > 8) {
+    box.append(el('div', 'ref-more', `and ${cards.length - 8} more, in the In this chat panel`))
+  }
+
+  return box
+}
+
+let refsKey = ''
+/** Draws the panel: artifacts, documents, files changed and links, the newest first, each once. */
+const renderRefs = () => {
+  const project = active()
+  const items = project?.items ?? []
+  const last = items[items.length - 1]
+  const key = `${activeId}|${items.length}|${last?.parts?.length ?? 0}|${last?.parts?.[last.parts.length - 1]?.text?.length ?? 0}`
+
+  if (key === refsKey) {
+    return
+  }
+
+  refsKey = key
+  const links = new Map()
+  const docs = new Map()
+  const changed = new Map()
+
+  // From the newest message back, so each thing sits where it was last named.
+  for (let at = items.length - 1; at >= 0; at -= 1) {
+    const refs = refsOf(items[at], items[at] === project.current || at === items.length - 1)
+
+    for (const link of refs.links) {
+      const had = links.get(link.url)
+      links.set(link.url, { label: had?.label || link.label, times: (had?.times ?? 0) + 1 })
+    }
+
+    for (const file of refs.docs) {
+      const key = file.replace(/\\/g, '/').toLowerCase()
+
+      // The same file named in full and by a shorter path is listed once.
+      if (![...docs.keys()].some(one => isSameFile(one, key))) {
+        docs.set(key, file)
+      }
+    }
+
+    for (const file of refs.changed) {
+      const had = changed.get(file)
+      changed.set(file, (had ?? 0) + 1)
+    }
+  }
+
+  const box = $('refs')
+  const MOST = 25
+  const section = (title, rows) => {
+    if (rows.length === 0) {
+      return
+    }
+
+    const head = el('div', 'sub', title)
+    head.append(el('span', 'right', String(rows.length)))
+    box.append(head, ...rows.slice(0, MOST))
+
+    if (rows.length > MOST) {
+      box.append(el('div', 'ref-more', `and ${rows.length - MOST} more, earlier in the chat`))
+    }
+  }
+  const fileRow = (file, note) => {
+    const row = el('div', 'ref-row')
+    const name = el('span', 'ref-name', baseName(file))
+    asFileLink(name, file)
+    const where = file.replace(/\\/g, '/').split('/').slice(0, -1).join('/')
+    row.append(name, el('small', '', note || where))
+    row.title = file
+    row.addEventListener('click', event => {
+      if (event.target !== name) {
+        name.click()
+      }
+    })
+
+    return row
+  }
+  const linkRow = ([url, { label, times }]) => {
+    const row = el('div', 'ref-row')
+    let host = ''
+    let tail = ''
+
+    try {
+      const at = new URL(url)
+      host = at.hostname.replace(/^www\./, '')
+      tail = decodeURIComponent(at.pathname.split('/').filter(Boolean).join('/'))
+    } catch {
+      host = url
+    }
+
+    const name = el('a', 'ref-name', label || tail || host)
+    name.href = url
+    row.append(name, el('small', '', times > 1 ? `${host} \u00b7 ${times} times` : host))
+    row.title = url
+    // Opened in the browser, as a link in a reply is; the main process checks the address again.
+    row.addEventListener('click', event => {
+      event.preventDefault()
+      window.open(url)
+    })
+    row.addEventListener('contextmenu', event => popMenu(event, [['Open the link', () => window.open(url)], ['Copy the link', () => void navigator.clipboard.writeText(url)]]))
+
+    return row
+  }
+  box.replaceChildren()
+  const all = [...links]
+  section('Artifacts', all.filter(([url]) => isArtifactLink(url)).map(linkRow))
+  section('Documents', [...docs.values()].map(file => fileRow(file)))
+  section('Files changed', [...changed].map(([file, times]) => fileRow(file, times > 1 ? `changed ${times} times` : '')))
+  section('Links', all.filter(([url]) => !isArtifactLink(url)).map(linkRow))
+  const total = links.size + docs.size + changed.size
+  $('refsCount').textContent = total > 0 ? String(total) : ''
+
+  if (total === 0) {
+    box.append(el('div', 'empty', project ? 'Documents, files, links and artifacts this chat names will be listed here.' : 'Open a chat to see what it names.'))
+  }
+}
+
+/**
+ * A command and what it printed, drawn as a terminal: a prompt, the command
+ * in its colours with a copy button, then the output on a darker ground.
+ * Long output shows its first lines with a line to show the rest.
+ */
+const TERM_FOLD = 14
+const paintTerminal = part => {
+  const box = el('div', 'term')
+  const command = String(part.input.command)
+  const kind = part.name === 'PowerShell' ? 'powershell' : 'bash'
+  const line = el('div', 'term-cmd')
+  const code = el('code')
+
+  if (hljs.getLanguage(kind) && command.length < 8000) {
+    // highlight.js returns its own markup with the text escaped.
+    code.innerHTML = hljs.highlight(command, { language: kind, ignoreIllegals: true }).value
+  } else {
+    code.textContent = command
+  }
+
+  const copy = el('button', 'term-copy', 'Copy')
+  copy.type = 'button'
+  copy.title = 'Copy the command'
+  copy.addEventListener('click', () => {
+    void navigator.clipboard.writeText(command)
+    copy.textContent = 'Copied'
+    setTimeout(() => (copy.textContent = 'Copy'), 1200)
+  })
+  line.append(el('span', 'term-ps', kind === 'powershell' ? 'PS>' : '$'), code, copy)
+  box.append(line)
+
+  if (part.result) {
+    // Colour codes meant for a real terminal are left out.
+    const text = part.result.slice(0, 20000).replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').replace(/\s+$/, '')
+    const lines = text.split('\n')
+    const out = el('div', `term-out${part.isError ? ' bad' : ''}`)
+    const pre = el('pre')
+    const isFolded = lines.length > TERM_FOLD + 4 && part.isOutOpen !== true
+    pre.textContent = isFolded ? lines.slice(0, TERM_FOLD).join('\n') : text
+    out.append(el('div', 'term-meta', `${part.isError ? 'failed \u00b7 ' : ''}${lines.length} ${lines.length === 1 ? 'line' : 'lines'}`), pre)
+
+    if (isFolded) {
+      const more = el('button', 'term-more', `Show all ${lines.length} lines`)
+      more.type = 'button'
+      more.addEventListener('click', () => {
+        part.isOutOpen = true
+        pre.textContent = text
+        more.remove()
+      })
+      out.append(more)
+    }
+    box.append(out)
+  }
+
+  return box
+}
+
+/** What a tool was asked, as short rows of name and value, in place of raw JSON. */
+const paintArgs = input => {
+  const box = el('div', 'tool-args')
+
+  for (const [name, value] of Object.entries(input ?? {})) {
+    // What the tool is for is already in the card's heading.
+    if (name === 'description' || value === undefined || value === null || value === '') {
+      continue
+    }
+
+    const row = el('div', 'tool-arg')
+    const words = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+    const shown = el('span', '', words.slice(0, 3000))
+
+    if (/(^|_)(file_?path|path|notebook_path)$/i.test(name) && typeof value === 'string') {
+      asFileLink(shown, value)
+    }
+    row.append(el('b', '', name.replace(/_/g, ' ')), shown)
+    box.append(row)
+  }
+
+  return box.children.length > 0 ? box : ''
+}
+
+/** A long block shows its first lines, with a line to show the rest. `fill` draws the given lines into the block. */
+const foldLong = (part, holder, lines, fill, most = 24) => {
+  const isFolded = lines.length > most + 6 && part.isOutOpen !== true
+  fill(isFolded ? lines.slice(0, most) : lines)
+
+  if (isFolded) {
+    const more = el('button', 'term-more', `Show all ${lines.length} lines`)
+    more.type = 'button'
+    more.addEventListener('click', () => {
+      part.isOutOpen = true
+      fill(lines)
+      more.remove()
+    })
+    holder.append(more)
+  }
+}
+
+/** What a tool gave back, as plain lines on a quiet ground. */
+const paintOutput = part => {
+  const box = el('div', `tool-out${part.isError ? ' bad' : ''}`)
+  const pre = el('pre')
+  const lines = part.result.slice(0, 20000).replace(/\s+$/, '').split('\n')
+  box.append(el('div', 'term-meta', `${part.isError ? 'failed \u00b7 ' : ''}${lines.length} ${lines.length === 1 ? 'line' : 'lines'}`), pre)
+  foldLong(part, box, lines, shown => (pre.textContent = shown.join('\n')), 14)
+
+  return box
+}
+
+/**
+ * A file Claude read: its name and which lines, then the lines themselves as
+ * code, each with its number in a margin and the code in its colours.
+ */
+const paintRead = part => {
+  const input = part.input
+  const box = el('div', 'read-view')
+  const head = el('div', 'read-head')
+  const name = el('span', '', input.file_path)
+  asFileLink(name, input.file_path)
+  const from = Number(input.offset) > 0 ? Number(input.offset) : 0
+  const range = from > 0 || Number(input.limit) > 0 ? `from line ${from || 1}${Number(input.limit) > 0 ? `, ${input.limit} lines` : ''}` : (input.pages ? `pages ${input.pages}` : 'the whole file')
+  head.append(name, el('small', '', range))
+  box.append(head)
+
+  if (!part.result) {
+    return box
+  }
+
+  // The tool numbers each line: "  12<tab>text" (older versions use an arrow).
+  const rows = part.result.slice(0, 60000).replace(/\s+$/, '').split('\n').map(line => /^\s*(\d+)(?:\t|\u2192| {1,2})(.*)$/.exec(line))
+
+  if (part.isError || rows.filter(Boolean).length < rows.length * 0.8) {
+    box.append(paintOutput(part))
+
+    return box
+  }
+
+  const kind = codeKindOf(input.file_path)
+  const code = el('div', 'code-view')
+  box.append(code)
+  foldLong(part, box, rows, shown => {
+    code.replaceChildren(
+      ...shown.map(row => {
+        const line = el('div', 'cl')
+        const text = el('code')
+
+        if (kind && row && row[2].length < 2000) {
+          // highlight.js returns its own markup with the text escaped.
+          text.innerHTML = hljs.highlight(row[2], { language: kind, ignoreIllegals: true }).value
+        } else {
+          text.textContent = row ? row[2] : ''
+        }
+        line.append(el('span', 'cn', row ? row[1] : ''), text)
+
+        return line
+      }),
+    )
+  })
+
+  return box
+}
+
 const paintTool = part => {
   const box = el('details', `tool own${part.isDone ? (part.isError ? ' failed' : ' done') : ' running'}`)
   const summary = el('summary')
@@ -1528,13 +2037,19 @@ const paintTool = part => {
   } else if (isWrite) {
     box.append(diffView('', input.content, input.file_path))
   } else if (typeof input.command === 'string') {
-    box.append(el('pre', '', `$ ${input.command}`))
+    box.append(paintTerminal(part))
+
+    return box
+  } else if (part.name === 'Read' && typeof input.file_path === 'string') {
+    box.append(paintRead(part))
+
+    return box
   } else {
-    box.append(el('pre', '', JSON.stringify(input, null, 2).slice(0, 4000)))
+    box.append(paintArgs(input))
   }
 
   if (part.result) {
-    box.append(el('pre', '', part.result.slice(0, 6000)))
+    box.append(paintOutput(part))
   }
 
   return box
@@ -1732,7 +2247,7 @@ const paint = item => {
 
     // Which files this reply changed, once it is whole.
     if (!isBeingWritten) {
-      main.append(paintFiles(item))
+      main.append(paintCards(item), paintFiles(item))
     }
 
     if (!isBeingWritten && !item.parts.some(part => part.isLive) && replyText(item).trim() !== '') {
@@ -1746,6 +2261,80 @@ const paint = item => {
 let chatFor = null
 // Whether the chat keeps to its end as a reply arrives (set by followChat's listeners below).
 let isFollowingChat = true
+// Where the chat stood when the program last looked or last moved it, to tell
+// the person's own scrolling from the chat's moving by itself.
+let chatTop = 0
+
+// Where the person was reading in each chat, kept between runs: the message
+// at the top of the view and how far into it. A chat that is followed to its
+// end keeps nothing and opens at its end.
+const spots = (() => {
+  try {
+    return new Map(Object.entries(JSON.parse(localStorage.getItem('spots') ?? '{}')))
+  } catch {
+    return new Map()
+  }
+})()
+let spotTimer = 0
+
+const keepSpot = () => {
+  clearTimeout(spotTimer)
+  spotTimer = setTimeout(() => {
+    const project = active()
+    const key = draftKeyOf(project)
+
+    // Only a chat that is fully on show: one still being read from its file says nothing yet.
+    if (!key || !project.isLoaded || chatFor !== activeId) {
+      return
+    }
+
+    spots.delete(key)
+
+    if (!isFollowingChat) {
+      const top = $('chat').getBoundingClientRect().top
+      const index = project.items.findIndex(item => item.node && item.node.getBoundingClientRect().bottom > top + 1)
+
+      if (index >= 0) {
+        spots.set(key, [index, Math.round(top - project.items[index].node.getBoundingClientRect().top)])
+      }
+    }
+
+    while (spots.size > 80) {
+      spots.delete(spots.keys().next().value)
+    }
+    localStorage.setItem('spots', JSON.stringify(Object.fromEntries(spots)))
+  }, 400)
+}
+
+/** Puts a chat that was just drawn back where the person was reading. False when there is no such place. */
+const backToSpot = project => {
+  const spot = project.isLoaded ? spots.get(draftKeyOf(project)) : undefined
+  const node = spot ? project.items[spot[0]]?.node : undefined
+
+  if (!node) {
+    return false
+  }
+
+  const chat = $('chat')
+  setFollow(false)
+  chat.scrollTop += node.getBoundingClientRect().top - chat.getBoundingClientRect().top + (Number(spot[1]) || 0)
+
+  return true
+}
+
+/** Starts or stops keeping to the end. Stopped, a button to go back to the newest message shows. */
+const setFollow = isOn => {
+  isFollowingChat = isOn
+  $('toEnd').classList.toggle('hidden', isOn || !active() || active().items.length === 0)
+}
+
+/** Goes to the newest message and keeps to it. */
+const goToEnd = () => {
+  const chat = $('chat')
+  setFollow(true)
+  chat.scrollTop = chat.scrollHeight
+  chatTop = chat.scrollTop
+}
 
 /**
  * The card a new person sees: what Cla-Amp is, then sign in, pick a
@@ -1808,10 +2397,12 @@ const renderChat = () => {
   const chat = $('chat')
   const project = active()
 
-  if (chatFor !== activeId) {
+  const isAnew = chatFor !== activeId
+
+  if (isAnew) {
     chatFor = activeId
-    // Another chat, or this one read anew: it opens at its end.
-    isFollowingChat = true
+    // Another chat, or this one read anew: it opens at its end, or where the person left it (see below).
+    setFollow(true)
     chat.replaceChildren()
 
     for (const item of project?.items ?? []) {
@@ -1880,27 +2471,60 @@ const renderChat = () => {
     // Reading further up: the view stays exactly where it is while the reply grows below.
     chat.scrollTop = keptTop
   }
+  // A chat opened again goes back to where the person was reading it.
+  if (isAnew) {
+    backToSpot(project)
+  }
+
+  // What the drawing itself moved is not the person's scrolling.
+  chatTop = chat.scrollTop
+  setFollow(isFollowingChat)
 }
 
 // Whether the chat keeps to its end as a reply arrives. Scrolling up, even a
-// little, stops it; coming back to the end starts it again.
+// little, stops it, and it stays stopped until the person scrolls down to the
+// end themselves or presses the button. Being near the end is not enough: a
+// slow scroll up is near the end for its first moments.
 {
   const chat = $('chat')
   chat.addEventListener('scroll', () => {
-    isFollowingChat = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 24
+    const top = chat.scrollTop
+    const left = chat.scrollHeight - top - chat.clientHeight
+
+    if (top < chatTop - 1 && left > 2) {
+      setFollow(false)
+    } else if (top > chatTop + 1 && left < 24) {
+      setFollow(true)
+    }
+    chatTop = top
+    keepSpot()
   })
   // The person's own wheel or keys count at once, before the view has moved far.
   chat.addEventListener('wheel', event => {
-    if (event.deltaY < 0) {
-      isFollowingChat = false
+    if (event.deltaY >= 0 || chat.scrollHeight <= chat.clientHeight) {
+      return
     }
+
+    // The wheel over a box inside the chat that can itself scroll up (a long output, a file) moves that box, not the chat.
+    for (let node = event.target; node instanceof Element && node !== chat; node = node.parentElement) {
+      if (node.scrollTop > 0) {
+        return
+      }
+    }
+    setFollow(false)
   }, { passive: true })
+  chat.addEventListener('keydown', event => {
+    if (['PageUp', 'ArrowUp', 'Home'].includes(event.key) && chat.scrollHeight > chat.clientHeight) {
+      setFollow(false)
+    }
+  })
+  $('toEnd').addEventListener('click', goToEnd)
   // A picture that finishes loading makes the chat taller: stay at the end if that is where the person is.
   chat.addEventListener(
     'load',
     event => {
       if (isFollowingChat && event.target instanceof HTMLImageElement) {
-        chat.scrollTop = chat.scrollHeight
+        goToEnd()
       }
     },
     true,
@@ -2030,6 +2654,7 @@ Nothing is deleted: its chats stay saved (find them again with Open chat, the Co
     })
     row.append(el('div', 'proj-ico'), text, el('span', `badge ${project.status}`, BADGES[project.status] ?? ''), remove)
     row.addEventListener('click', () => void select(project.id))
+    asKey(row)
     list.append(row)
 
     for (const sub of project.subs) {
@@ -2107,7 +2732,7 @@ const showConversation = (project, events, shouldSelect = true) => {
     return
   }
   chatFor = null
-  void select(project.id).then(() => ($('chat').scrollTop = $('chat').scrollHeight))
+  void select(project.id).then(goToEnd)
 }
 
 const openSavedChat = async chat => {
@@ -2262,6 +2887,7 @@ const renderChats = () => {
       head.append(mark)
     }
     head.append(el('i', '', String(chats.length)))
+    asKey(head)
     head.addEventListener('click', () => {
       if (!shut.delete(key)) {
         shut.add(key)
@@ -2374,11 +3000,12 @@ const renderChats = () => {
       }
       row.append(pin)
       row.addEventListener('click', () => void openSavedChat(chat))
+      asKey(row)
       box.append(row)
     }
 
     if (chats.length > most) {
-      const more = el('div', 'more', `Show ${chats.length - most} more`)
+      const more = asKey(el('div', 'more', `Show ${chats.length - most} more`))
       more.addEventListener('click', () => {
         grown.add(key)
         renderChats()
@@ -3930,6 +4557,7 @@ const songRow = (song, { onPlay, button, onButton, title }) => {
   }
   row.append(...shownCols().map(id => cell[id]()), side)
   row.addEventListener('click', onPlay)
+  asKey(row)
 
   return row
 }
@@ -4107,6 +4735,7 @@ const renderDeck = () => {
       })
       row.classList.toggle('active', list.file === deck.playlist)
       row.title = `${list.file}\nClick to show this playlist's songs in the list; click again for all the songs.`
+      asKey(row)
       row.addEventListener('click', () => showPlaylist(list.file === deck.playlist ? '' : list.file))
       row.append(el('span', '', list.name), el('small', '', list.isMissing ? 'file not found' : count(list.files.length)), drop)
 
@@ -4259,6 +4888,11 @@ const animate = now => {
       isDemo || isWorking ? 0.25 + 0.3 * Math.abs(Math.sin(now / 420 + i * 0.7)) + 0.25 * Math.abs(Math.sin(now / 173 + i * 1.9)) : 0,
     )
   } else if (!deck.isSounding) {
+    deck.target = deck.target.map(() => 0)
+  }
+
+  // Calm (Widgets, or Windows' own setting): nothing moves by itself, so the spectrum rests.
+  if (document.body.classList.contains('calm')) {
     deck.target = deck.target.map(() => 0)
   }
 
@@ -4493,6 +5127,8 @@ const renderWidgets = () => {
   const now = new Date()
   // The status bar's clock ticks with the widgets.
   renderBarExtras()
+  // So does the list of what the chat names: drawn again only when the chat has changed.
+  renderRefs()
 
   if (isShown('time')) {
     const state = project?.status === 'working' ? 'Working' : project?.status === 'attention' ? 'Needs you' : elsewhere(project) ? 'Working in another app' : 'Idle'
@@ -4581,9 +5217,29 @@ const wireWidgets = () => {
       }
 
       const id = panel.dataset.panel
+      const isPanel = one => one?.classList.contains('panel') && !one.classList.contains('gone') && !one.classList.contains('hidden')
+      let above = panel.previousElementSibling
+      let below = panel.nextElementSibling
+
+      while (above && !isPanel(above)) {
+        above = above.previousElementSibling
+      }
+
+      while (below && !isPanel(below)) {
+        below = below.nextElementSibling
+      }
+
+      const moved = () => {
+        savePanels()
+        putColumns()
+        panel.querySelector('h3')?.focus()
+      }
       popMenu(
         event,
         [
+          ...(above ? [['Move up', () => (above.before(panel), moved())]] : []),
+          ...(below ? [['Move down', () => (below.after(panel), moved())]] : []),
+          ...(document.body.classList.contains('col2') ? [['Move to the other column', () => ((panel.parentElement === $('right2') ? $('right') : $('right2')).append(panel), moved())]] : []),
           [
             `Hide ${panelName(panel)}`,
             () => {
@@ -4765,6 +5421,32 @@ const wireWidgets = () => {
     })
     fontRow.append(el('span', '', 'Text'), fontPick)
     menu.append(fontRow, el('div', 'wg-note', 'Free, open-source typefaces you install on this computer (Inter, Roboto, Noto Sans, JetBrains Mono, Atkinson Hyperlegible and others) show up in this list.'))
+    // Calm, and the size of everything.
+    const calmRow = el('label', 'wg-layout')
+    const calmPick = el('select')
+    calmPick.append(...[['', 'Same as Windows'], ['on', 'On'], ['off', 'Off']].map(([value, words]) => Object.assign(el('option', '', words), { value })))
+    calmPick.value = calmChoice()
+    calmPick.addEventListener('change', () => setCalm(calmPick.value))
+    calmRow.append(el('span', '', 'Calm'), calmPick)
+    const sizeRow = el('label', 'wg-layout')
+    const sizePick = el('select')
+    sizePick.append(...SIZES.map(size => Object.assign(el('option', '', `${size}%`), { value: String(size) })))
+    sizePick.value = String(sizeNow())
+    sizePick.addEventListener('change', () => setSize(Number(sizePick.value)))
+    sizeRow.append(el('span', '', 'Size'), sizePick)
+    calmRow.title = 'Calm keeps the window still: no moving spectrum, glow, sliding title or blinking.'
+    sizeRow.title = 'The size of everything in the window. Ctrl and + or - change it too; Ctrl and 0 puts it back.'
+    // The language of the window's own text. Each language is listed under its own name.
+    const langRow = el('label', 'wg-layout')
+    const langPick = el('select')
+    langPick.dataset.ownWords = ''
+    langPick.append(Object.assign(el('option', '', 'Same as Windows'), { value: '' }), ...LANGS.map(([code, name]) => Object.assign(el('option', '', name), { value: code })))
+    langPick.value = langChoice()
+    langPick.addEventListener('change', () => setLang(langPick.value))
+    langRow.append(el('span', '', 'Language'), langPick)
+    langRow.title = 'Changes the words of the window itself. Messages, code and the guides stay as they were written. The window draws itself again; chats keep running.'
+    // First in the menu: what a person looks for before anything else.
+    menu.prepend(el('div', 'wg-head', 'Window'), langRow, sizeRow, calmRow, el('hr'))
     // It opens under its button, at the top of the window.
     const at = $('wgChoose').getBoundingClientRect()
     menu.style.top = `${Math.round(at.bottom + 4)}px`
@@ -5000,7 +5682,7 @@ const markedInChat = () => {
 
 const submit = (text, files = [], isNow = false) => {
   // Sending a message goes to the end and follows the answer.
-  isFollowingChat = true
+  setFollow(true)
   const project = active()
   const words = text.trim()
 
@@ -5334,7 +6016,7 @@ const wire = () => {
     }
 
     for (const one of found) {
-      const row = el('div', `pick${one.isCurrent ? ' current' : ''}`)
+      const row = asKey(el('div', `pick${one.isCurrent ? ' current' : ''}`))
       row.append(el('span', 'pick-title', one.title), el('span', 'pick-when', `${one.isCurrent ? 'open now' : ago(one.lastModified)}  ·  ${one.size > 1048576 ? `${Math.round(one.size / 1048576)} MB` : `${Math.max(1, Math.round(one.size / 1024))} KB`}`))
       row.addEventListener('click', async () => {
         list.replaceChildren(el('div', 'empty', 'Opening...'))
@@ -5387,6 +6069,7 @@ const wire = () => {
   for (const button of document.querySelectorAll('.tab')) {
     button.addEventListener('click', () => {
       tab = button.dataset.tab
+      localStorage.setItem('tab', tab)
 
       if (tab === 'chats') {
         void loadChats()
@@ -5437,6 +6120,25 @@ const wire = () => {
   }
 
   for (const splitter of document.querySelectorAll('.splitter')) {
+    // With the keyboard: Tab to the divider, then the left and right arrows.
+    asKey(splitter, 'separator')
+    splitter.setAttribute('aria-orientation', 'vertical')
+    splitter.setAttribute('aria-label', 'Column width: left and right arrows change it')
+    splitter.addEventListener('keydown', event => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+        return
+      }
+
+      event.preventDefault()
+      const side = splitter.dataset.side
+      const column = $(side)
+      const width = column.getBoundingClientRect().width
+      const grows = column.getBoundingClientRect().left < splitter.getBoundingClientRect().left ? 1 : -1
+      const room = Math.max(0, $('center').getBoundingClientRect().width - CHAT_LEAST)
+      const next = Math.round(Math.min(Math.max(width, Math.min(900, width + room)), Math.max(200, width + (event.key === 'ArrowRight' ? 24 : -24) * grows)))
+      root.style.setProperty(`--${side}`, `${next}px`)
+      localStorage.setItem(`width-${side}`, String(next))
+    })
     splitter.addEventListener('pointerdown', down => {
       const side = splitter.dataset.side
       const column = $(side)
@@ -5498,6 +6200,11 @@ const wire = () => {
     // A saved layout that no longer parses: keep the default order.
   }
 
+  // A panel newer than the saved order ("In this chat") goes under the music deck, not above everything.
+  if (!(localStorage.getItem('panels') ?? '').includes('"refs"')) {
+    document.querySelector('.cols [data-panel="deck"]')?.after(document.querySelector('.cols [data-panel="refs"]'))
+  }
+
   // Blocks moved in Arrange mode go back where they were left.
   putPlaces()
 
@@ -5530,7 +6237,7 @@ const wire = () => {
   }
 
   for (const panel of document.querySelectorAll('.cols .panel')) {
-    const head = panel.querySelector('h3')
+    const head = asKey(panel.querySelector('h3'))
     head.addEventListener('click', () => {
       panel.classList.toggle('closed')
       savePanels()
@@ -6154,15 +6861,19 @@ const start = async () => {
     if (event.t === 'reload') {
       if (project.isLoaded) {
         const chat = $('chat')
-        const wasAtEnd = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 80
+        const wasFollowing = isFollowingChat
+        const keptTop = chat.scrollTop
         showConversation(project, event.events, false)
 
         if (project.id === activeId) {
           chatFor = null
           renderChat()
 
-          if (wasAtEnd) {
-            chat.scrollTop = chat.scrollHeight
+          // Someone reading further up stays where they were.
+          if (!wasFollowing) {
+            chat.scrollTop = keptTop
+            chatTop = chat.scrollTop
+            setFollow(false)
           }
         }
       }
@@ -6181,6 +6892,12 @@ const start = async () => {
       }
 
       return
+    }
+
+    if (event.t === 'permission') {
+      announce(`Claude asks to use ${event.tool} in ${project.name}`, true)
+    } else if (event.t === 'result') {
+      announce(event.isOk === false ? `${project.name}: the reply ended with an error` : `${project.name}: Claude finished replying`)
     }
 
     if (event.t === 'result' && !event.isOk && /not signed in/i.test(event.error ?? '')) {
@@ -6263,6 +6980,8 @@ const start = async () => {
     void deckCmd('vol', loaded.prefs.volume.toFixed(2))
   }
   renderDeck()
+  // The tab that was open last time.
+  document.querySelector(`.tab[data-tab="${localStorage.getItem('tab') ?? ''}"]:not(.active)`)?.click()
   const remembered = localStorage.getItem('active')
   await select(projects.has(remembered) ? remembered : (projects.keys().next().value ?? null))
 }

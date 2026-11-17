@@ -321,7 +321,27 @@ const readTranscript = id => {
   }
 }
 
+// The demo (--demo) is for pictures and for trying the window out. It must
+// show nothing of the person's: no account, chats, settings, themes or music,
+// and it must change nothing they keep. So the main process itself answers
+// the demo window with made-up values, whatever part of the window asks.
+// Only these calls do their real work there: they read nothing personal.
+const DEMO_REAL = new Set(['about:info', 'docs:read', 'app:reload', 'win', 'win:least', 'window:glass', 'zoom:set', 'text:copy', 'outside:state'])
+const DEMO_SAYS = {
+  'settings:read': () => ({ account: { isSignedIn: true, email: 'you@example.com', organization: 'Example', plan: 'max', method: 'Claude subscription' }, files: [] }),
+  'look:get': () => ({}),
+  'themes:list': () => [],
+  // The skins that come with the app, never the person's own.
+  'skins:list': () => listSkins().filter(one => !one.isOwn).map(({ sheet: _sheet, ...skin }) => skin),
+}
+// What the main process tells the window by itself: only that its code changed.
+const DEMO_HEARS = new Set(['amp:update'])
+
 const send = (channel, payload) => {
+  if (IS_DEMO && !DEMO_HEARS.has(channel)) {
+    return
+  }
+
   if (win !== null && !win.isDestroyed()) {
     win.webContents.send(channel, payload)
   }
@@ -3977,6 +3997,14 @@ const handlers = {
 
     return { ...scanSongs(), picked: playlistFiles().find(one => one.toLowerCase() === file.toLowerCase()) }
   },
+  // The size of everything in the window (Widgets, or Ctrl with + and -), as a browser's zoom does it.
+  'zoom:set': factor => {
+    if (typeof factor === 'number' && factor >= 0.5 && factor <= 3 && win !== null && !win.isDestroyed()) {
+      win.webContents.setZoomFactor(factor)
+    }
+
+    return true
+  },
   // Takes a playlist out of the app. Its file, and the songs, stay where they are.
   'music:unlist': file => {
     state.prefs.playlists = playlistFiles().filter(one => one !== file)
@@ -4281,14 +4309,58 @@ const isOurPage = event => {
   )
 }
 
+// Test switch CLAAMP_PLACE=1: the hidden test window keeps and takes its place too.
+const IS_PLACE_TEST = process.env.CLAAMP_PLACE === '1'
+
+/**
+ * Where the window stood and how large it was when it was last used, so it
+ * opens the same way. Null when nothing is kept, or when that place is no
+ * longer on any screen (a monitor was unplugged): the usual size then.
+ */
+const keptPlace = () => {
+  const kept = state.prefs.window
+
+  if ((SHOT && !IS_PLACE_TEST) || IS_DEMO || !kept || ![kept.x, kept.y, kept.width, kept.height].every(Number.isFinite)) {
+    return null
+  }
+
+  const area = screen.getDisplayMatching(kept).workArea
+  const width = Math.round(Math.min(Math.max(kept.width, 940), area.width))
+  const height = Math.round(Math.min(Math.max(kept.height, 600), area.height))
+  // Wholly on that screen, moved in from an edge it hung over.
+  const x = Math.round(Math.min(Math.max(kept.x, area.x), area.x + area.width - width))
+  const y = Math.round(Math.min(Math.max(kept.y, area.y), area.y + area.height - height))
+
+  return { x, y, width, height, isMax: kept.isMax === true }
+}
+
+let keepTimer = null
+
+/** Keeps the window's place and size. While it has made room for the browser beside it, the place it had before counts. */
+const keepPlace = (isNow = false) => {
+  if ((SHOT && !IS_PLACE_TEST) || IS_DEMO || win === null || win.isDestroyed() || win.isMinimized() || win.isFullScreen() || isFitting) {
+    return
+  }
+
+  const own = dockedFrom ?? win.getNormalBounds()
+  state.prefs.window = { x: own.x, y: own.y, width: own.width, height: own.height, isMax: dockedFrom === null && win.isMaximized() }
+  clearTimeout(keepTimer)
+
+  if (isNow) {
+    saveState()
+  } else {
+    keepTimer = setTimeout(saveState, 600)
+  }
+}
+
 const createWindow = () => {
   isClearWindow = !SHOT && process.platform === 'win32' && state.prefs.clearGlass === true
+  const place = keptPlace()
 
   win = new BrowserWindow({
     // Clear glass (a skin's --window-glass: clear): nothing is drawn behind the page.
     transparent: isClearWindow,
-    width: 1320,
-    height: SHOT ? numberArg('height', 880) : 880,
+    ...(place ? { x: place.x, y: place.y, width: place.width, height: place.height } : { width: 1320, height: SHOT ? numberArg('height', 880) : 880 }),
     minWidth: 940,
     minHeight: 600,
     frame: false,
@@ -4310,6 +4382,14 @@ const createWindow = () => {
     },
   })
   win.setMenu(null)
+
+  if (place?.isMax) {
+    win.maximize()
+  }
+
+  for (const changed of ['resized', 'moved', 'maximize', 'unmaximize']) {
+    win.on(changed, () => keepPlace())
+  }
 
   for (const moved of ['move', 'resize', 'restore', 'maximize', 'unmaximize', 'show']) {
     win.on(moved, placePlayer)
@@ -4333,6 +4413,7 @@ const createWindow = () => {
   }
   // Closing Cla-Amp closes the player with it (a restart lets it play on).
   win.on('close', event => {
+    keepPlace(true)
     // Work that was started from here stops when the window closes: ask first.
     const busy = [...sessions.values()].filter(one => one.isBusy || one.agentCount > 0 || one.queue.length > 0)
 
@@ -4459,6 +4540,10 @@ void app.whenReady().then(() => {
     ipcMain.handle(name, (event, ...args) => {
       if (!isOurPage(event)) {
         throw new Error('Refused: the call did not come from the Cla-Amp window.')
+      }
+
+      if (IS_DEMO && !DEMO_REAL.has(name)) {
+        return DEMO_SAYS[name]?.() ?? null
       }
 
       // Test switch CLAAMP_TIME=1: every call that takes over 150 ms is printed with its time.

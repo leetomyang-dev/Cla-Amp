@@ -115,7 +115,8 @@
           </div>
           <div class="pin-bar hidden" id="pinBar"></div>
           <div id="centerTop" data-slot="centerTop" data-slot-name="Above the chat"></div>
-          <div id="chat"></div>
+          <div id="chat" role="region" aria-label="Chat" tabindex="0"></div>
+          <div class="to-end-holder"><button type="button" id="toEnd" class="to-end hidden" title="Go to the newest message and follow the reply">&darr; Latest</button></div>
           <div id="waitingBar" class="waiting-bar hidden" aria-label="Messages waiting their turn"></div>
           <form id="composer">
             <div id="slashMenu" class="slash-menu hidden" role="listbox" aria-label="Commands and skills"></div>
@@ -236,6 +237,10 @@
               </div>
             </div>
           </section>
+          <section class="panel" data-panel="refs">
+            <h3 draggable="true">In this chat<span class="right" id="refsCount"></span></h3>
+            <div class="panel-body" id="refs"></div>
+          </section>
           <section class="panel" data-panel="limits">
             <h3 draggable="true">Usage limits<span class="right led" id="planName"></span></h3>
             <div class="panel-body" id="limits"></div>
@@ -290,13 +295,13 @@
       <div class="wg-menu hidden" id="wgMenu"></div>
 
       <div id="videoWin" class="hidden">
-        <div class="video-bar"><span id="videoName">Video</span><button class="chrome-btn close" id="videoClose">&#10005;</button></div>
+        <div class="video-bar"><span id="videoName">Video</span><button class="chrome-btn close" id="videoClose" title="Close" aria-label="Close">&#10005;</button></div>
         <video id="videoEl" controls></video>
       </div>
     </div>
     <div id="picker" class="hidden">
       <div class="picker-box">
-        <div class="video-bar"><span>Open a conversation</span><button class="chrome-btn close" id="pickerClose">&#10005;</button></div>
+        <div class="video-bar"><span>Open a conversation</span><button class="chrome-btn close" id="pickerClose" title="Close" aria-label="Close">&#10005;</button></div>
         <div class="picker-note" id="pickerNote"></div>
         <div class="list" id="pickerList"></div>
       </div>

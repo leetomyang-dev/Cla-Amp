@@ -399,6 +399,10 @@ body.no-right #right, body.no-right .splitter[data-side='right'] { display: none
 
 /* ---- chat ---- */
 #chat { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; user-select: text; }
+/* The button back to the newest message, over the foot of the chat while the person reads further up. */
+.to-end-holder { position: relative; flex: none; height: 0; z-index: 5; }
+.to-end { position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%); padding: 5px 14px; border: 1px solid var(--accent); border-radius: 999px; background: var(--solid, var(--panel)); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35); }
+.to-end:hover { background: var(--accent); color: var(--bg, #000); }
 .msg { display: flex; gap: 12px; margin-bottom: 14px; }
 .avatar { width: 34px; height: 34px; flex: none; border-radius: 9px; background: var(--accent) url('you.svg') center / 78% no-repeat; }
 .avatar.claude { background: #2a1608 url('bars.svg') center / 70% no-repeat; }
@@ -502,6 +506,63 @@ body.no-right #right, body.no-right .splitter[data-side='right'] { display: none
 .files-changed .fc-row { display: flex; align-items: baseline; gap: 8px; padding: 1px 0; }
 .files-changed .fc-row .file-link { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
 .files-changed .fc-row small { color: var(--dim); }
+/* The cards under a reply: an artifact it links, a document it wrote or names. */
+.ref-cards { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 4px; }
+.ref-card { display: flex; align-items: center; gap: 10px; min-width: 200px; max-width: 320px; flex: 1 1 220px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--solid, var(--panel)); cursor: pointer; }
+.ref-card:hover { border-color: var(--accent); }
+.ref-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ref-card-mark { flex: none; display: grid; place-items: center; width: 36px; height: 40px; border: 1px solid var(--line); border-radius: 6px; background: rgba(127, 127, 127, 0.12); color: var(--dim); font: 700 10px var(--mono); letter-spacing: 0.04em; }
+.ref-card.art .ref-card-mark { color: #d9703a; border-color: #d9703a; font-size: 18px; }
+.ref-card-words { min-width: 0; display: flex; flex-direction: column; }
+.ref-card-words b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 13px; }
+.ref-card-words small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); font-size: 11px; }
+/* "In this chat": the artifacts, documents, changed files and links the chat has named. */
+#refs { max-height: 300px; overflow-y: auto; }
+#refs .sub:first-child { margin-top: 0; }
+.ref-row { display: flex; align-items: baseline; gap: 8px; padding: 2px 6px; border-radius: 4px; font-size: 12px; cursor: pointer; }
+.ref-row:hover { background: var(--row-hover); }
+.ref-row .ref-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); text-decoration: none; }
+.ref-row .ref-name.file-link { text-decoration: underline dotted; text-underline-offset: 3px; }
+.ref-row small { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); text-align: right; direction: rtl; }
+.ref-more { padding: 2px 6px; color: var(--dim); font-size: 11px; }
+/* What a tool was asked: short rows of name and value. */
+.tool-args { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; padding: 8px 10px; border-top: 1px solid var(--line); font: 12px/1.45 var(--mono); }
+.tool-arg { display: contents; }
+.tool-arg b { color: var(--dim); font-weight: 400; }
+.tool-arg span { min-width: 0; max-height: 160px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* What it gave back, and a file that was read: dark in every skin, like the terminal. */
+.tool-out, .read-view .code-view { position: relative; border-top: 1px solid #1c2230; background: #06070b; color: #aeb8c8; }
+.tool-out { border-radius: 0 0 6px 6px; overflow: hidden; }
+.tool-out pre { border-top: 0; max-height: 320px; white-space: pre; }
+.tool-out.bad pre { color: #ffb0a8; }
+.tool-out.bad { box-shadow: inset 3px 0 0 #ef4444; }
+.tool-out.bad .term-meta { color: #ff8a80; }
+.read-view { border-top: 1px solid var(--line); border-radius: 0 0 6px 6px; overflow: hidden; }
+.read-head { display: flex; align-items: baseline; gap: 10px; padding: 6px 10px; font: 12px var(--mono); }
+.read-head span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.read-head small { flex: none; margin-left: auto; color: var(--dim); font-family: var(--font); font-size: 11px; }
+.code-view { max-height: 380px; overflow: auto; padding: 4px 0; font: 12px/1.5 var(--mono); }
+.code-view .cl { display: flex; min-width: max-content; }
+.code-view .cn { flex: none; width: 52px; padding-right: 12px; text-align: right; color: #56617a; user-select: none; position: sticky; left: 0; background: #06070b; }
+.code-view code { padding: 0 12px 0 0; background: none; color: #d7dde8; font: inherit; white-space: pre; }
+/* A command and its output as a terminal: dark in every skin, with its own text colours. */
+.term { border-top: 1px solid var(--line); border-radius: 0 0 6px 6px; overflow: hidden; background: #0b0d13; color: #d7dde8; font: 12px/1.5 var(--mono); }
+.term-cmd { position: relative; display: flex; gap: 8px; padding: 8px 10px; }
+.term-ps { flex: none; color: #39d353; user-select: none; }
+.term-cmd code { flex: 1; min-width: 0; max-height: 220px; overflow: auto; padding: 0; background: none; color: inherit; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool.running .term-cmd code::after { content: '\258d'; margin-left: 2px; color: #39d353; animation: term-blink 1.1s steps(1) infinite; }
+@keyframes term-blink { 50% { opacity: 0; } }
+.term-copy { position: absolute; top: 5px; right: 6px; padding: 1px 7px; border: 1px solid #2a3142; border-radius: 4px; background: #141925; color: #9aa7bd; font: 11px var(--font); cursor: pointer; visibility: hidden; }
+.term-cmd:hover .term-copy { visibility: visible; }
+.term-copy:hover { color: #fff; }
+.term-out { position: relative; border-top: 1px solid #1c2230; background: #06070b; }
+.term-out pre { border-top: 0; color: #aeb8c8; white-space: pre; max-height: 320px; }
+.term-out.bad pre { color: #ffb0a8; }
+.term-out.bad { box-shadow: inset 3px 0 0 #ef4444; }
+.term-meta { position: absolute; top: 4px; right: 14px; padding: 0 6px; border-radius: 4px; background: #06070b; color: #6b778c; font: 10px var(--font); pointer-events: none; }
+.term-out.bad .term-meta { color: #ff8a80; }
+.term-more { display: block; width: 100%; padding: 4px 10px; border: 0; border-top: 1px solid #1c2230; background: #0b0d13; color: #7aa7ff; font: 11px var(--font); text-align: left; cursor: pointer; }
+.term-more:hover { text-decoration: underline; }
 .tool pre.del { color: #ff9c92; background: rgba(239, 68, 68, 0.07); }
 .tool pre.add { color: #8be29d; background: rgba(57, 211, 83, 0.07); }
 
@@ -1075,3 +1136,25 @@ body:not(.arranging).side-tall.col2.r2-empty { --side-w: var(--right); }
 body:not(.arranging).side-tall.col2.r2-empty #right { right: 10px; }
 body:not(.arranging).side-tall.panels-left.col2.r2-empty #right { right: auto; left: 10px; }
 body:not(.arranging).side-tall.col2.r1-empty { --side-w: var(--r2); }
+
+/* ---- for everyone (renderer/access.js) ---- */
+/* Words for a screen reader only. */
+.sr-only { position: fixed; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+/* What has the keyboard's focus always shows it. */
+:focus-visible { outline: 2px solid var(--accent-hi, var(--accent)); outline-offset: 1px; }
+input:focus-visible, select:focus-visible, #chatSearch:focus-visible, #songSearch:focus-visible, .filters select:focus-visible { outline: 2px solid var(--accent-hi, var(--accent)); outline-offset: 0; }
+#input:focus-visible { outline: 0; }
+#composer:focus-within { box-shadow: 0 0 0 2px var(--accent-hi, var(--accent)); }
+#chat:focus-visible { outline-offset: -2px; }
+.splitter:focus-visible { background: var(--accent-hi, var(--accent)); }
+/* Calm: nothing moves by itself. */
+body.calm *, body.calm *::before, body.calm *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+/* Windows' contrast themes: keep edges and the chosen thing visible when colours are replaced. */
+@media (forced-colors: active) {
+  button, select, input, textarea, .panel, .msg, .tool, .proj, .song, .wg-menu, .sheet { border: 1px solid ButtonText; }
+  .tab.active, .seg-btn.active, .mini.on, .chip-btn.on, .lvl.active, .proj.active, .song.active { background: Highlight; color: HighlightText; forced-color-adjust: none; }
+  .splitter { background: ButtonText; }
+  :focus-visible { outline: 3px solid Highlight; }
+}
+/* Other languages run longer than English: the tabs keep to one line. */
+html:not([lang="en"]) .tab, html:not([lang="en"]) .seg-btn { padding-inline: 4px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

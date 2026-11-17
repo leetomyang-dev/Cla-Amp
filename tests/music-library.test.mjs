@@ -5,7 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { describeSong, readCover, readPlaylist, readTags, scanFolders } from '../music-library.mjs'
+import { describeSong, readCover, readingsOf, readPlaylist, readTags, scanFolders } from '../music-library.mjs'
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claamp-music-'))
 const a = path.join(root, 'a')
@@ -132,6 +132,44 @@ fs.writeFileSync(
   ['#EXTM3U', '#EXTINF:1,One', 'a/one.mp3', tagged, 'https://example.com/stream.mp3', '//server/share/x.mp3', 'a/notes.txt', 'a/missing.mp3', path.join('b', 'four.flac')].join('\r\n'),
 )
 assert.deepEqual(readPlaylist(list), [tagged, tagged, lossless], 'only local song files that exist')
+// Words with no stated encoding: UTF-8, an older Chinese encoding, Western.
+const MOON = Buffer.from([0xd4, 0xc2, 0xb9, 0xe2]) // the two characters of "moonlight", written the older Chinese way
+const moon = String.fromCharCode(0x6708, 0x5149)
+const cafe = `Caf${String.fromCharCode(0xe9)}`
+assert.equal(readingsOf(Buffer.from('plain'))[0], 'plain')
+assert.equal(readingsOf(Buffer.from(moon, 'utf8'))[0], moon, 'UTF-8 with no mark')
+assert.equal(readingsOf(MOON)[0], moon, 'the older Chinese encoding')
+assert.equal(readingsOf(Buffer.from(cafe, 'latin1'))[0], cafe, 'Western')
+// Short Western words with several accents stay Western; Chinese mixed with plain letters stays Chinese.
+const nono = [0xd1, 0x6f, 0xf1, 0x6f]
+assert.equal(readingsOf(Buffer.from(nono))[0], String.fromCharCode(...nono), 'accents among plain letters')
+assert.equal(readingsOf(Buffer.concat([MOON, Buffer.from(' (Remix Edit 2025)')]))[0], `${moon} (Remix Edit 2025)`, 'Chinese with plain letters after it')
+const rawFrame = (id, bytes) => {
+  const head = Buffer.alloc(10)
+  head.write(id, 0, 'latin1')
+  head.writeUInt32BE(bytes.length + 1, 4)
+
+  return Buffer.concat([head, Buffer.from([0]), bytes])
+}
+const old = path.join(a, 'old.mp3')
+fs.writeFileSync(old, mp3([rawFrame('TIT2', MOON), rawFrame('TPE1', Buffer.from(moon, 'utf8')), rawFrame('TALB', Buffer.from(cafe, 'latin1'))]))
+assert.deepEqual((({ title, artist, album }) => ({ title, artist, album }))(readTags(old)), { title: moon, artist: moon, album: cafe })
+fs.rmSync(old)
+// A playlist written the older way names files by bytes; the reading that finds the file wins.
+const moonSong = path.join(b, `${moon}.mp3`)
+const cafeSong = path.join(b, `${cafe} long plain name to keep the share of high bytes low.mp3`)
+fs.writeFileSync(moonSong, mp3([frame('TIT2', 'Moon')]))
+fs.writeFileSync(cafeSong, mp3([frame('TIT2', 'Cafe')]))
+const oldList = path.join(b, 'old.m3u')
+fs.writeFileSync(oldList, Buffer.concat([Buffer.from('#EXTM3U\r\n'), MOON, Buffer.from('.mp3\r\n'), Buffer.from(`${path.basename(cafeSong)}\r\n`, 'latin1')]))
+assert.deepEqual(readPlaylist(oldList), [moonSong, cafeSong], 'a playlist in an older encoding')
+const wideList = path.join(b, 'wide.m3u8')
+fs.writeFileSync(wideList, Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`${moon}.mp3\r\n`, 'utf16le')]))
+assert.deepEqual(readPlaylist(wideList), [moonSong], 'a UTF-16 playlist')
+
+for (const one of [moonSong, cafeSong, oldList, wideList]) {
+  fs.rmSync(one)
+}
 const pls = path.join(root, 'mix.pls')
 fs.writeFileSync(pls, ['[playlist]', `File1=${lossless}`, 'Title1=Second Sun', 'NumberOfEntries=1'].join('\n'))
 assert.deepEqual(readPlaylist(pls), [lossless])

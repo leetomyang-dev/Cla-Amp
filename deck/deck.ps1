@@ -7,6 +7,12 @@
 # Commands arrive as lines `seq|command|argument` in the file $env:CA_CMD.
 # Status leaves as lines `@{json}` on standard output.
 $ErrorActionPreference = 'SilentlyContinue'
+# One status line out. Every letter outside plain ASCII goes as \uXXXX, so a
+# title in Chinese, Japanese, Korean, Thai, Arabic, with accents or with
+# emoji arrives whole whatever code page this hidden console has.
+function Say([string]$json) {
+  [Console]::Out.WriteLine('@' + [regex]::Replace($json, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value }))
+}
 Add-Type -AssemblyName PresentationCore
 Add-Type -TypeDefinition @'
 using System;
@@ -369,7 +375,7 @@ function Send-Art($session, [string]$key) {
     }
   } catch {}
   if ($data -ne '') {
-    [Console]::Out.WriteLine('@' + (@{ ev = 'art'; key = $key; data = $data } | ConvertTo-Json -Compress))
+    Say (@{ ev = 'art'; key = $key; data = $data } | ConvertTo-Json -Compress)
     return $true
   }
   return $false
@@ -460,7 +466,7 @@ while ($true) {
   if ($peak[1] -gt $right) { $right = $peak[1] }
 
   if ($tick % 3 -eq 0) {
-    foreach ($row in @(Get-Content -LiteralPath $env:CA_CMD)) {
+    foreach ($row in @(Get-Content -LiteralPath $env:CA_CMD -Encoding UTF8)) {
       $part = ([string]$row).Split('|', 3)
       if ($part.Count -lt 2) { continue }
       $seq = 0
@@ -564,7 +570,7 @@ while ($true) {
         vol = $volume; l = [math]::Round($left, 3); r = [math]::Round($right, 3)
         sp = @($frames); web = $web; view = $view; wv = [math]::Round($webVol, 2)
       }
-      [Console]::Out.WriteLine('@' + ($status | ConvertTo-Json -Compress -Depth 4))
+      Say ($status | ConvertTo-Json -Compress -Depth 4)
       [Console]::Out.Flush()
       $note = ''
     }

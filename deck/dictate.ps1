@@ -11,7 +11,8 @@
 $ErrorActionPreference = 'Stop'
 
 function Say($thing) {
-  [Console]::Out.WriteLine('@' + ($thing | ConvertTo-Json -Compress))
+  # Letters outside plain ASCII go as \uXXXX, so they arrive whole whatever code page this hidden console has.
+  [Console]::Out.WriteLine('@' + [regex]::Replace(($thing | ConvertTo-Json -Compress), '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value }))
   [Console]::Out.Flush()
 }
 

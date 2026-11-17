@@ -39,6 +39,66 @@ const genreName = text => {
   return found ? (GENRES[Number(found[1])] ?? '') : text.replace(/^\(\d{1,3}\)/, '')
 }
 
+// The older two-byte ways of writing Chinese, Japanese and Korean, the one
+// this computer's language points to first.
+const OLD_WAYS = (() => {
+  const all = ['gb18030', 'big5', 'shift_jis', 'euc-kr']
+  const lang = Intl.DateTimeFormat().resolvedOptions().locale.toLowerCase()
+  const first = lang.startsWith('ja') ? 'shift_jis' : lang.startsWith('ko') ? 'euc-kr' : /^zh-(tw|hk|mo|hant)/.test(lang) ? 'big5' : 'gb18030'
+
+  return [first, ...all.filter(one => one !== first)]
+})()
+
+/** The bytes read one way, or null when they are not written that way. */
+const readAs = (bytes, way) => {
+  try {
+    return new TextDecoder(way, { fatal: true }).decode(bytes)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Every reading of some bytes that claim no encoding (an old ID3 tag, a line
+ * of an .m3u playlist), the likeliest first. Plain ASCII and proper UTF-8
+ * have one reading. Otherwise the words are Western (Windows-1252) or in an
+ * older two-byte way. The two-byte ways write a character as two bytes above
+ * 127 side by side; a Western accented letter stands alone among plain
+ * letters. So when the high bytes come in pairs it is read the two-byte way
+ * first, and as Western first otherwise.
+ */
+export const readingsOf = bytes => {
+  const high = bytes.reduce((sum, one) => sum + (one > 127 ? 1 : 0), 0)
+
+  if (high === 0) {
+    return [bytes.toString('latin1')]
+  }
+
+  const plain = readAs(bytes, 'utf-8')
+
+  if (plain !== null) {
+    return [plain]
+  }
+
+  const west = new TextDecoder('windows-1252').decode(bytes)
+  const old = OLD_WAYS.map(way => readAs(bytes, way)).filter(one => one !== null)
+
+  // High bytes that stand in a run of two or more.
+  let paired = 0
+  let run = 0
+
+  for (let at = 0; at <= bytes.length; at += 1) {
+    if (at < bytes.length && bytes[at] > 127) {
+      run += 1
+    } else {
+      paired += run >= 2 ? run : 0
+      run = 0
+    }
+  }
+
+  return paired / high >= 0.8 ? [...old, west] : [west, ...old]
+}
+
 /** The text of one ID3 frame: a byte saying how it is encoded, then the words. */
 const frameText = bytes => {
   if (bytes.length < 2) {
@@ -58,7 +118,10 @@ const frameText = bytes => {
     }
     text = words.toString('utf16le')
   } else {
-    text = body.toString(bytes[0] === 3 ? 'utf8' : 'latin1')
+    // Marked as UTF-8, or not marked: many songs carry UTF-8 or an older
+    // Chinese, Japanese or Korean encoding under the "Western" mark.
+    const end = body.indexOf(0)
+    text = bytes[0] === 3 ? body.toString('utf8') : readingsOf(end < 0 ? body : body.subarray(0, end))[0]
   }
 
   return tidy(text.split('\u0000')[0])
@@ -383,8 +446,8 @@ export const describeSong = (file, cache = {}, root = path.dirname(file)) => {
   }
 
   // `v` is the form of what is kept: details kept by an older version are read again.
-  if (cache[file]?.mark !== mark || cache[file].v !== 2) {
-    cache[file] = { mark, v: 2, ...readTags(file) }
+  if (cache[file]?.mark !== mark || cache[file].v !== 3) {
+    cache[file] = { mark, v: 3, ...readTags(file) }
   }
 
   const { title, artist, album, genre, track, length } = cache[file]
@@ -432,6 +495,21 @@ export const scanFolders = (folders, cache = {}) => {
   return songs
 }
 
+/** Whether one reading of a playlist's line names a song file that exists. */
+const isSongLine = (base, raw) => {
+  const line = (/^File\d+=(.*)$/i.exec(raw)?.[1] ?? raw).trim()
+
+  if (line === '' || line.startsWith('#') || /^[a-z][a-z0-9+.-]*:\/\//i.test(line) || /^[\\/]{2}/.test(line)) {
+    return false
+  }
+
+  try {
+    return fs.statSync(path.resolve(base, line)).isFile()
+  } catch {
+    return false
+  }
+}
+
 /**
  * The song files a playlist names (.m3u, .m3u8 or .pls), in order. Only files
  * that exist on this computer's own drives are kept: web addresses and
@@ -442,11 +520,29 @@ export const readPlaylist = file => {
     throw new Error('That playlist is too large.')
   }
 
-  const text = fs.readFileSync(file, 'utf8').replace(/^﻿/, '')
+  const bytes = fs.readFileSync(file)
   const base = path.dirname(file)
   const found = []
+  // Each line with every way it can be read. A playlist says nothing about
+  // its encoding: UTF-8, UTF-16, or whatever the computer that wrote it used.
+  let rows = []
 
-  for (const raw of text.split(/\r?\n/)) {
+  if ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff)) {
+    rows = new TextDecoder(bytes[0] === 0xff ? 'utf-16le' : 'utf-16be').decode(bytes).split(/\r?\n/).map(one => [one])
+  } else {
+    let at = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0
+
+    while (at < bytes.length) {
+      const end = bytes.indexOf(10, at)
+      const stop = end < 0 ? bytes.length : end
+      rows.push(readingsOf(bytes.subarray(at, stop)))
+      at = stop + 1
+    }
+  }
+
+  for (const readings of rows) {
+    // The reading that names a file that is there; the likeliest when none does.
+    const raw = readings.find(one => isSongLine(base, one)) ?? readings[0]
     const line = (/^File\d+=(.*)$/i.exec(raw)?.[1] ?? raw).trim()
 
     if (line === '' || line.startsWith('#') || line.startsWith('[') || /^(NumberOfEntries|Version|Title\d+|Length\d+)=/i.test(line)) {

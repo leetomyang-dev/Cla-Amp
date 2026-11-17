@@ -1,0 +1,50 @@
+/* High Contrast: for easy reading. White text on black, yellow for what is
+   chosen, bright edges on everything that can be pressed, nothing see-through. */
+:root {
+  --bg: #000000;
+  --panel: #000000;
+  --panel-2: #000000;
+  --row: #000000;
+  --row-hover: #1f1f1f;
+  --line: #ffffff;
+  --text: #ffffff;
+  --dim: #e6e6e6;
+
+  --led: #3cff00;
+  --amber: #ffd500;
+  --red: #ff6b6b;
+  --blue: #7fd4ff;
+  --led-off: #2b2b2b;
+  --orange: #ffb04a;
+
+  --violet: #ffe600;
+  --accent-hi: #fff59a;
+  --accent-fill: #ffe600;
+  --accent-glow: transparent;
+  --accent-soft: #ffffff;
+
+  --app-bg: #000000;
+  --app-edge: #ffffff;
+  --titlebar: #000000;
+  --titlebar-text: #ffffff;
+  --display: #000000;
+  --button: #000000;
+  --button-text: #ffffff;
+  --chrome-button: #000000;
+  --tab: #000000;
+  --tab-active: #ffe600;
+  --tab-active-text: #000000;
+  --brand-a: #ffffff;
+  --brand-b: #ffe600;
+}
+
+button, select, input, textarea { border: 1px solid #ffffff; text-shadow: none; box-shadow: none; }
+.chrome-btn { color: #ffffff; }
+.panel, .msg, .tool, .statusbar, .wg-menu, .sheet { border: 1px solid #ffffff; box-shadow: none; backdrop-filter: none; }
+.tab.active, .seg-btn.active, .mini.on, .chip-btn.on, .wg-pick.on, .lvl.active { background: #ffe600; color: #000000; border-color: #ffe600; }
+.proj.active { background: #ffe600; }
+.proj.active, .proj.active .proj-name, .proj.active .proj-detail { color: #000000 !important; text-shadow: none; }
+.song.active, .song.active small { color: #ffe600; }
+a, .file-link { color: #7fd4ff; text-decoration: underline; }
+:focus-visible { outline: 3px solid #ffe600 !important; outline-offset: 2px; }
+::selection { background: #ffe600; color: #000000; }
