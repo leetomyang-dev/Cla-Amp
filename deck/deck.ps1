@@ -93,8 +93,23 @@ namespace ClaAmp {
       capture = (IAudioCaptureClient)service;
     }
 
+    static int deaf;
+
+    // Lets go of the speakers being listened to; the next Pump opens the default ones again.
+    static void Close() {
+      try { if (client != null) client.Stop(); } catch {}
+      try { if (capture != null) Marshal.ReleaseComObject(capture); } catch {}
+      try { if (client != null) Marshal.ReleaseComObject(client); } catch {}
+      capture = null; client = null;
+    }
+
     // Moves what the speakers played since the last call into the ring.
-    public static void Pump() {
+    // `loud` is the level of the speakers that are the default right now. When
+    // they are playing and nothing has arrived here for three seconds, this is
+    // listening to speakers that are no longer the default (headphones plugged
+    // in, a screen's sound gone to sleep and back, another output chosen): it
+    // lets go and opens the new ones.
+    public static void Pump(float loud) {
       try {
         if (capture == null) {
           if (waits-- > 0) return;
@@ -102,12 +117,19 @@ namespace ClaAmp {
           Open();
           if (capture == null) return;
         }
+        bool isFirst = true;
         while (true) {
           uint frames;
-          if (capture.GetNextPacketSize(out frames) != 0) { capture = null; client = null; return; }
-          if (frames == 0) return;
+          if (capture.GetNextPacketSize(out frames) != 0) { Close(); return; }
+          if (frames == 0) {
+            if (!isFirst) { deaf = 0; return; }
+            deaf = loud > 0.02f ? deaf + 1 : 0;
+            if (deaf > 75) { deaf = 0; Close(); waits = 0; }
+            return;
+          }
+          isFirst = false;
           IntPtr data; uint got, flags; ulong at, clock;
-          if (capture.GetBuffer(out data, out got, out flags, out at, out clock) != 0) { capture = null; client = null; return; }
+          if (capture.GetBuffer(out data, out got, out flags, out at, out clock) != 0) { Close(); return; }
           int count = (int)got * channels;
           if ((flags & 2) == 0 && isFloat && count > 0) {
             var block = new float[count];
@@ -460,7 +482,7 @@ while ($true) {
   $tick++
 
   $peak = [ClaAmp.Meter]::Read()
-  [ClaAmp.Spectrum]::Pump()
+  [ClaAmp.Spectrum]::Pump([float][math]::Max($peak[0], $peak[1]))
   if ($tick % 2 -eq 0) { [void]$frames.Add([ClaAmp.Spectrum]::Bands(24)) }
   if ($peak[0] -gt $left) { $left = $peak[0] }
   if ($peak[1] -gt $right) { $right = $peak[1] }
