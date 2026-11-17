@@ -1001,7 +1001,8 @@ class Session {
       this.tasks.delete(message.task_id)
 
       if (task?.isBackground) {
-        this.emit({ t: 'agent-bg-done', id: task.id, isOk: message.status === 'completed' })
+        // One the person stopped is not a failure.
+        this.emit({ t: 'agent-bg-done', id: task.id, isOk: message.status === 'completed' || message.status === 'stopped' })
         this.setStatus(this.status)
       }
 
@@ -1144,6 +1145,27 @@ class Session {
       this.queue = []
       this.setStatus('working', 'Stopping')
       await this.query.interrupt().catch(() => {})
+    }
+  }
+
+  /**
+   * Stops one piece of background work (an agent, a command, a workflow, a
+   * monitor) by the id its row carries. The engine then says it ended, which
+   * takes it off the count. True when the engine was asked.
+   */
+  async stopTask(id) {
+    const found = [...this.tasks.entries()].find(([, task]) => task.id === id && task.isBackground)
+
+    if (this.query === null || !found) {
+      return false
+    }
+
+    try {
+      await this.query.stopTask(found[0])
+
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -3266,6 +3288,8 @@ const handlers = {
     return file
   },
   'project:stop': id => sessionOf(id)?.stop(),
+  // Stops one background agent or command of a chat; the chat itself carries on.
+  'task:stop': async (id, taskId) => (typeof taskId === 'string' ? (await sessionOf(id)?.stopTask(taskId)) === true : false),
   // What is saved about a project (its model and effort among it), answered at once: no Claude Code process is started for it.
   'project:describe': id => {
     const project = state.projects.find(one => one.id === id)

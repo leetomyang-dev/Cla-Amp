@@ -77,6 +77,7 @@ const CALLS = new Set([
   'win',
   'win:least',
   'win:flash',
+  'task:stop',
   'work:load',
   'pick:video',
   'file:view',

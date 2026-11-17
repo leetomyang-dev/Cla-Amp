@@ -307,6 +307,12 @@ with a "working" badge until it ends, and is counted in the running
 number in the status bar, so you can see before closing whether
 anything is still going.
 
+To stop one of them without stopping the chat, point at its row and
+press the small square (**■**), or right-click the row and choose
+**Stop it** (**Stop this agent** for an agent). It asks first. The
+**Stop** button by the message box is different: it stops what Claude
+is doing in that chat, its background work included.
+
 Closing Cla-Amp also closes the browser windows that belong to it: the
 music players, its claude.ai window and its own Browser. They are
 stopped outright, not asked, so a player that is playing cannot hold

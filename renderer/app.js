@@ -2721,6 +2721,20 @@ Nothing is deleted: its chats stay saved (find them again with Open chat, the Co
         keepAgentsGone()
         renderProjects()
       }
+      // Only work in the background can be stopped by itself; the rest ends with its turn (Stop).
+      const canStop = !isOver && sub.isBackground === true
+      const stopIt = async () => {
+        if (!(confirm(`Stop "${sub.name}"?\n\nIt ends now and what it was doing is left unfinished. The chat itself carries on.`))) {
+          return
+        }
+
+        if (isDemo) {
+          apply(project, { t: 'agent-bg-done', id: sub.id, isOk: true, ts: Date.now() })
+          renderProjects()
+        } else if ((await call('task:stop', project.id, sub.id)) !== true) {
+          alert('It could not be stopped. It may have just ended by itself.')
+        }
+      }
       words.append(el('div', 'proj-name', sub.name), el('div', 'proj-detail', sub.kind))
       child.append(el('div', `proj-ico agent${sub.isTask ? ' task' : ''}`), words, el('span', `badge ${sub.status}`, BADGES[sub.status]))
       child.title = sub.isTask
@@ -2730,10 +2744,23 @@ Nothing is deleted: its chats stay saved (find them again with Open chat, the Co
       child.addEventListener('contextmenu', event =>
         popMenu(event, [
           sub.isTask ? ['Open its chat', () => void select(project.id)] : ['See what it did', () => void openAgent(project, sub)],
+          ...(canStop ? [[sub.isTask ? 'Stop it' : 'Stop this agent', () => void stopIt()]] : []),
           ...(isOver ? [['Take it off the list', drop]] : []),
           ['Clear finished agents', clearAgents],
         ]),
       )
+
+      if (canStop) {
+        const stop = el('button', 'proj-x proj-stop', '\u25a0')
+        stop.type = 'button'
+        stop.title = sub.isTask ? 'Stop this background work' : 'Stop this background agent'
+        stop.setAttribute('aria-label', stop.title)
+        stop.addEventListener('click', event => {
+          event.stopPropagation()
+          void stopIt()
+        })
+        child.append(stop)
+      }
 
       if (isOver) {
         const shut = el('button', 'proj-x', '\u00d7')
