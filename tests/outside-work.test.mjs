@@ -28,6 +28,17 @@ test('a message counts once it is asked about or while fresh', () => {
   // A notice left when the app closed: old, and never sent on.
   assert.equal(turnState([said('end_turn'), message('<task-notification>', 500), ...extras].join('\n'), now), 'idle')
   assert.equal(turnState(message('[Request interrupted by user]', 5), now), 'idle')
+  // A notice the engine wrote a moment ago (a background task ended as the app closed) is not work.
+  assert.equal(turnState([said('end_turn', 90), message('<task-notification> <task-id>x</task-id>', 5), ...extras].join('\n'), now), 'idle')
+})
+
+test('an old turn in a freshly saved file, and an agent that handed back, are not working', () => {
+  // Saved again today, but the turn itself stopped an hour ago.
+  assert.equal(turnState([said('tool_use', 3600), ...extras].join('\n'), now), 'idle')
+  const handback = line({ type: 'assistant', timestamp: at(9), message: { stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'SubagentHandback', input: {} }] } })
+  const delivered = line({ type: 'user', timestamp: at(8), message: { content: [{ type: 'tool_result', content: 'Report delivered' }] } })
+  assert.equal(turnState([handback, delivered].join('\n'), now), 'idle')
+  assert.equal(turnState(handback, now), 'idle')
 })
 
 test('chats and their agents are counted, skipped chats and old files are not', () => {

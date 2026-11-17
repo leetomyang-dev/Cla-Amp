@@ -18,6 +18,7 @@ const el = (tag, className = '', text = '') => {
 
 /** Key (the file's name in docs, or 'readme'), and the name shown. */
 const GUIDES = [
+  ['quick-start', 'Quick start: make it yours'],
   ['user-guide', 'Using Cla-Amp'],
   ['skins', 'Skins and looks'],
   ['privacy', 'Privacy'],

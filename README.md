@@ -10,6 +10,8 @@ runs Claude Code, unchanged, on your computer.
 
 ![The Cla-Amp window in demo mode, with made-up projects and songs](docs/pictures/cla-amp.png)
 
+![A short tour: the Widgets menu, the status bar's parts, hiding a panel, arranging the window, another skin](docs/pictures/cla-amp-tour.webp)
+
 Windows only for now.
 
 ## What it can do
@@ -32,7 +34,13 @@ Windows only for now.
 - **Change its look.** Skins, widgets (clock, calendar, today's
   numbers), movable panels, saved themes, and classic Winamp skins imported
   for their colours.
+- **Arrange it your way.** Drag panels and whole sections of the window
+  about, hide what you do not use with a right-click, choose what the status
+  bar and the song list show, and save the lot as a theme.
+- **Change the program itself by asking.** Cla-Amp is its own source code:
+  add its folder as a project and tell Claude what you want changed.
 
+Five minutes to make it yours: [docs/quick-start.md](docs/quick-start.md).
 More about each part: [docs/details.md](docs/details.md). How to use it:
 [docs/user-guide.md](docs/user-guide.md).
 
@@ -66,8 +74,23 @@ double-click starts it at once.
   expected for a downloaded `.bat` file; choose to run it if you trust where
   you got Cla-Amp from.
 - There is no installer and the program is not signed.
-- To update later, download the ZIP again and unzip it over the old folder.
-  Your settings and sign-ins are kept elsewhere on your computer and stay.
+- Your settings, chats and sign-ins are kept elsewhere on your computer, not
+  in this folder.
+
+## Update it
+
+Cla-Amp never updates by itself. When you want the newest version:
+
+1. Close Cla-Amp.
+2. Double-click **Update.bat** in the Cla-Amp folder and answer **Y**.
+
+It fetches the newest version from this page and puts it over the folder
+(with git if the folder was made with git, else from the ZIP), then fetches
+anything new that Cla-Amp needs. Your settings, chats, themes and sign-ins
+stay as they are. Files of Cla-Amp that you changed yourself are replaced.
+
+By hand it is the same thing: download the ZIP again and unzip it over the
+old folder, or run `git pull` and `npm install` in a folder made with git.
 
 ### If you know your way around
 
@@ -126,8 +149,9 @@ What signing in involves:
   browser.
 - To draw the spectrum it captures the sound your computer is playing, in
   memory only; nothing is saved or sent.
-- One thing goes out, and only when you use it: **Import from link** fetches
-  the one Winamp skin you pointed it at from the Winamp Skin Museum.
+- Two things go out, each only when you use it: **Import from link** fetches
+  the one Winamp skin you pointed it at from the Winamp Skin Museum, and
+  **Update.bat** downloads Cla-Amp's newest version from this page.
 - It holds no password, key or token for any service.
 - It reads the Claude desktop app's list of chats on your computer, to show
   their titles and grouping. It never changes that app's files.
@@ -195,6 +219,8 @@ Every package and its licence: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## More
 
+- [docs/quick-start.md](docs/quick-start.md): arranging the window, and
+  asking Claude to change Cla-Amp itself.
 - [docs/user-guide.md](docs/user-guide.md): using Cla-Amp, for people.
 - [docs/details.md](docs/details.md): every part of the window.
 - [docs/skins.md](docs/skins.md): making a skin.

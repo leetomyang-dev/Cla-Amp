@@ -9,7 +9,7 @@ Every part of the window and the things worth knowing about each. For a first st
 | Title bar | Skin picker, show or hide the left and right columns, window buttons. |
 | Top bar | The song that is playing, with previous, play and next. |
 | Button row | Open chat, New chat, Video, Shuffle projects. |
-| Message box | Type and press Enter. Under the text: how Claude asks before it acts (Ask / Auto-edit / Plan, click to change), the microphone for dictation, and Stop while Claude is working. |
+| Message box | Type and press Enter (Shift+Enter for a new line); the box grows as you write. **Files:** drop files anywhere on the window, paste a picture, or press the paperclip; each shows as a chip above the text until you send, and its "x" takes it off. Any number of files of any kind can go with a message. Pictures are shown to Claude directly (the first 20, each up to 3.5 MB; more or larger ones go by path); every other file, video and music included, is given by its path for Claude to read or work on with its tools. **Quote:** mark text in the chat and press the Quote button that appears, or use the quote button under a reply; the text goes into your message as a quote. Under the text: how Claude asks before it acts (Ask / Auto-edit / Auto / Plan, click to change; in Auto, Claude Code checks each step itself and asks you only for the risky ones), the microphone for dictation, and Stop while Claude is working. |
 | Status strip | Agents running, how full the context is, the git branch. |
 | Left: Projects | Folders with a chat in Cla-Amp, and their agents. |
 | Left: Chats | Every saved chat on this computer by folder, the desktop app's and the terminal's included. Search, pin, click to open. |
@@ -36,10 +36,12 @@ Every part of the window and the things worth knowing about each. For a first st
   wav, m4a, wma, flac, aac). Add as many folders as you like. Search the
   songs, or narrow them by artist, genre or folder; songs with no tags are
   sorted by the folder they sit in. Press **+** on a song to put it in **Up
-  next**, the dice for a random song, or **Import playlist** to queue the
-  songs of an .m3u, .m3u8 or .pls file. "YouTube Music" has **Open player**: YouTube Music as a
+  next**, or the dice for a random song. **Columns** picks what each
+  song's row shows (number, artist, album, genre, folder, time); click a
+  column's name to sort by it. **Import playlist** adds an .m3u, .m3u8
+  or .pls file to **Playlists**, where it stays until you take it out. "YouTube Music" has **Open player**: YouTube Music as a
   window of its own that belongs to your browser (Chrome, Edge or Brave; pick
-  which if you have several). In Edge and Brave the window is attached to
+  which if you have several). The window is attached to
   Cla-Amp and has a browser profile of its own: sign in to Google there
   once. Start a playlist there and it keeps playing while that window is
   open, even hidden. "Spotify" has **Open Spotify app**, which starts the
@@ -71,7 +73,11 @@ Every part of the window and the things worth knowing about each. For a first st
   own files change. A changed stylesheet or skin shows at once. Changed
   window code shows **Reload to update** in the title bar (chats keep
   running, your unsent message is kept); changed app code shows **Restart to
-  update**. So you can ask Claude, in Cla-Amp, to change Cla-Amp.
+  update**. Claude Code runs inside Cla-Amp, so a restart stops work that is
+  running; if a chat is working you choose between **Restart when the work
+  is done** (nothing is stopped, it restarts by itself afterwards) and
+  **Restart now and carry on** (each working chat is told to carry on after
+  the restart, and waiting messages are kept). So you can ask Claude, in Cla-Amp, to change Cla-Amp.
 
 ## Skins
 

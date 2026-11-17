@@ -139,12 +139,22 @@ export const readTurn = (text, now = Date.now()) => {
     // request for it is noted, or while it is fresh; a notice left behind
     // when its app closed has neither.
     const isAnswer = blocks.some(one => one?.type === 'tool_result')
-    found.state = isAnswer || isAsked || now - found.at < FRESH ? 'working' : 'idle'
+    // Only a message the person typed counts while fresh: a notice the engine
+    // writes by itself (a background task ended, the app was closed) starts with "<".
+    const isTyped = !said.trimStart().startsWith('<')
+    found.state = isAnswer || isAsked || (isTyped && now - found.at < FRESH) ? 'working' : 'idle'
 
     if (found.state === 'idle') {
       break
     }
     // Working: one line further back holds the tool call being answered.
+  }
+
+  // A file can be saved again long after its turn stopped (the desktop app
+  // re-saves old chats), so the turn's own time counts, not only the file's.
+  // And an agent that has handed its report back is finished.
+  if (found.state === 'working' && ((found.at > 0 && now - found.at > QUIET_AFTER) || found.doing.startsWith('SubagentHandback'))) {
+    found.state = 'idle'
   }
 
   if (found.state !== 'working') {

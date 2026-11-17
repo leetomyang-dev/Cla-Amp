@@ -19,6 +19,7 @@
         <button id="update" class="update-chip hidden"></button>
         <select id="skin" class="hidden" title="The skin: how Cla-Amp looks"></select>
         <button class="chrome-btn wide" id="skinImport" title="Import a Winamp skin: pick a .wsz file and Cla-Amp turns it into a skin and puts it on">Import skin</button>
+        <button class="chrome-btn wide" id="wgChoose" title="Widgets: which panels and widgets show, what the status bar shows, and how the window is laid out">Widgets</button>
         <button class="chrome-btn wide" id="themesBtn" title="Themes: every look Cla-Amp can wear and where it came from. Save your own set-up under a name, export it, import one.">Themes</button>
         <button class="chrome-btn" id="lookBtn" title="Customize: the colours, pictures, edges and text of each part of the window">&#9998;</button>
         <button class="chrome-btn" id="aboutBtn" title="About Cla-Amp: credits and what it is built with">&#8505;</button>
@@ -31,10 +32,10 @@
         <button class="chrome-btn close" data-win="close" title="Close">&#10005;</button>
       </header>
 
-      <section class="brand">
+      <section class="brand" data-slot="brand" data-slot-name="Top row">
         <span class="burst"></span>
-        <span class="brand-name">Cla-<em>Amp</em></span>
-        <div class="top-song" title="What the music deck is playing">
+        <span class="brand-name" data-block="logo">Cla-<em>Amp</em></span>
+        <div class="top-song" data-block="player" title="What the music deck is playing">
           <div class="top-line">
           <button class="mini" id="topPrev" title="Previous">&#9198;</button>
           <button class="mini primary" id="topPlay" title="Play or pause">&#9654;</button>
@@ -57,8 +58,10 @@
         </div>
       </section>
 
-      <section class="transport">
+      <section class="transport" data-slot="transport" data-slot-name="Button row">
+        <div class="tb-group" data-block="buttons">
         <button class="deck-btn" id="claudeChat" data-tb title="Open claude.ai (your regular chats and projects) in a window docked to this one. You sign in there yourself; press again to tuck it away."><svg class="tb-ico" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="#f4ede4" stroke="#c96a3a"/><g stroke="#d9703a" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14M7.2 7.2l9.6 9.6M16.8 7.2l-9.6 9.6"/></g></svg><span>Claude.ai</span></button>
+        <button class="deck-btn" id="pagesBtn" data-tb title="Cla-Amp's own browser, attached to this window. It is separate from your everyday browser: no sign-ins, history or add-ons are shared. Pages Claude made open here. Press again to tuck it away."><svg class="tb-ico" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><rect x="2.5" y="4" width="19" height="16" rx="2" fill="#ffffff" stroke="#7f9db9"/><path d="M2.5 8.5h19" stroke="#7f9db9"/><circle cx="5.5" cy="6.3" r="0.9" fill="#e0685e"/><circle cx="8.3" cy="6.3" r="0.9" fill="#e9b84c"/><path d="M6 12h12M6 15h8" stroke="#9aa7b8" stroke-width="1.4" stroke-linecap="round"/></svg><span>Browser</span></button>
         <button class="deck-btn" id="openChat" title="Open a conversation saved for this folder, including ones from the Claude desktop app"><svg class="tb-ico" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M2.5 7a2 2 0 0 1 2-2h4.2l2 2.2h8.8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2h-15a2 2 0 0 1-2-2z" fill="#f6c343" stroke="#b9881a"/><path d="M2.5 11h19" stroke="#fbe08a"/></svg><span>Open chat</span></button>
         <button class="deck-btn" id="newChat" title="Start a new chat in this project. The one that is open stays saved: find it in the Chats tab."><svg class="tb-ico" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M6 2.5h8.5L19 7v14.5H6z" fill="#ffffff" stroke="#7f9db9"/><path d="M14.5 2.5V7H19" fill="#dbe7fb" stroke="#7f9db9"/><circle cx="17.5" cy="18" r="5" fill="#3fb24a" stroke="#1f7d2a"/><path d="M17.5 15.2v5.6M14.7 18h5.6" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round"/></svg><span>New chat</span></button>
         <button class="deck-btn" id="shuffle" title="Jump to another project at random">
@@ -68,19 +71,23 @@
         <button class="deck-btn tb-extra" id="tbTheme" title="Customize: the colours, pictures, edges and text of each part of the window"><svg class="tb-ico" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path d="M12 2.5C6.5 2.5 2.5 6.4 2.5 11.6c0 4.6 3.6 8.4 8.2 8.4 1.5 0 2-1 1.6-2-.6-1.6.4-2.8 2-2.8h2.6c2.6 0 4.6-2 4.6-4.7 0-4.6-4.2-8-9.5-8z" fill="#f3e3c3" stroke="#a9834a"/><circle cx="7.5" cy="10" r="1.6" fill="#e0483a"/><circle cx="11" cy="6.6" r="1.6" fill="#f2b830"/><circle cx="15.6" cy="7.4" r="1.6" fill="#3fb24a"/><circle cx="18" cy="11" r="1.6" fill="#2a8de0"/></svg><span>Theme</span></button>
         <button class="deck-btn tb-extra" id="tbSettings" title="Settings: your account, and what Claude Code's settings files set"><svg class="tb-ico" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><g fill="#9aa7bd" stroke="#5d6a82"><path d="M10.3 2.5h3.4l.5 2.6 1.9.8 2.2-1.5 2.4 2.4-1.5 2.2.8 1.9 2.6.5v3.4l-2.6.5-.8 1.9 1.5 2.2-2.4 2.4-2.2-1.5-1.9.8-.5 2.6h-3.4l-.5-2.6-1.9-.8-2.2 1.5-2.4-2.4 1.5-2.2-.8-1.9-2.6-.5v-3.4l2.6-.5.8-1.9-1.5-2.2 2.4-2.4 2.2 1.5 1.9-.8z"/></g><circle cx="12" cy="12.4" r="3.4" fill="#eef2f8" stroke="#5d6a82"/></svg><span>Settings</span></button>
         <button class="deck-btn tb-extra" id="tbHelp" title="Guides: how to use Cla-Amp, skins, the playlists, security"><svg class="tb-ico" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><circle cx="12" cy="12" r="9.5" fill="#f6c343" stroke="#b9881a"/><path d="M9 9.6c0-1.8 1.4-3 3.1-3 1.8 0 3.1 1.1 3.1 2.8 0 2.4-2.9 2.4-2.9 4.6" fill="none" stroke="#3a2a00" stroke-width="2" stroke-linecap="round"/><circle cx="12.2" cy="17.3" r="1.3" fill="#3a2a00"/></svg><span>Help</span></button>
-        <div class="top-eq"><canvas id="brandEq" width="220" height="40" title="Click for another look, right-click for all the choices"></canvas></div>
+        </div>
+        <div class="top-eq" data-block="spectrum"><canvas id="brandEq" width="220" height="60" title="Click for another look, right-click for all the choices"></canvas></div>
       </section>
 
-      <section class="statusbar">
-        <button class="led-text led-btn" id="agentsBtn" aria-expanded="false" title="Show which chats and agents are working"><i class="dot"></i><span id="agentsRunning">0 agents running</span><i class="caret"></i></button>
+      <section class="statusbar" data-slot="statusbar" data-slot-name="Status bar">
+        <!-- Each part of the bar can be shown or hidden (Widgets, Status bar shows). -->
+        <span class="sb-item" data-sb="agents"><button class="led-text led-btn" id="agentsBtn" aria-expanded="false" title="Show which chats and agents are working"><i class="dot"></i><span id="agentsRunning">0 agents running</span><i class="caret"></i></button></span>
         <div class="work-list hidden" id="workList"></div>
-        <span class="sep"></span>
-        <span class="led-text">Context: <span id="contextPct">--</span></span>
-        <span class="meter" id="contextMeter"></span>
-        <span class="sep"></span>
-        <span class="led-text">Branch: <span id="branch">--</span></span>
+        <span class="sb-item" data-sb="context"><span class="led-text">Context: <span id="contextPct">--</span></span><span class="meter" id="contextMeter"></span></span>
+        <span class="sb-item" data-sb="branch"><span class="led-text">Branch: <span id="branch">--</span></span></span>
+        <span class="sb-item" data-sb="model"><button class="led-text led-btn" id="sbModelBtn" title="The model this chat runs on. Click to pick another.">Model: <span id="sbModel">--</span><i class="caret"></i></button></span>
+        <span class="sb-item" data-sb="effort"><button class="led-text led-btn" id="sbEffortBtn" title="How hard the model thinks. Click to pick another level.">Effort: <span id="sbEffort">--</span><i class="caret"></i></button></span>
+        <span class="sb-item" data-sb="limits"><span class="led-text" id="sbLimits">Limits: --</span></span>
         <span class="grow"></span>
-        <span class="chip" id="stateChip">Idle</span>
+        <span class="sb-item" data-sb="date"><span class="led-text" id="sbDate"></span></span>
+        <span class="sb-item" data-sb="time"><span class="led-text" id="sbTime"></span></span>
+        <span class="sb-item" data-sb="state"><span class="chip" id="stateChip">Idle</span></span>
       </section>
 
       <main class="cols">
@@ -96,6 +103,7 @@
             <div id="chatGroups"></div>
           </div>
           <div class="list hidden" id="queueList"></div>
+          <div id="leftBottom" data-slot="leftBottom" data-slot-name="Under the projects"></div>
           <button class="deck-btn wide" id="addProject">+ Add project folder</button>
         </aside>
         <div class="splitter" data-side="left"></div>
@@ -106,11 +114,15 @@
             <button class="pill go" id="signInButton">Sign in</button>
           </div>
           <div class="pin-bar hidden" id="pinBar"></div>
+          <div id="centerTop" data-slot="centerTop" data-slot-name="Above the chat"></div>
           <div id="chat"></div>
+          <div id="waitingBar" class="waiting-bar hidden" aria-label="Messages waiting their turn"></div>
           <form id="composer">
             <div id="slashMenu" class="slash-menu hidden" role="listbox" aria-label="Commands and skills"></div>
-            <textarea id="input" rows="1" placeholder="Message Cla-Amp..."></textarea>
+            <div id="attachList" class="attach-list hidden" aria-label="Files that go with this message"></div>
+            <textarea id="input" rows="3" placeholder="Message Cla-Amp..."></textarea>
             <div class="composer-row">
+              <button type="button" class="chip-btn" id="attach" title="Attach files to this message. You can also drop files on the window, or paste a picture.">&#128206;</button>
               <button type="button" class="chip-btn" id="mode" title="How Claude asks before it acts"><span>Ask</span> &#9662;</button>
               <button type="button" class="chip-btn" id="mic" title="Dictate: speak and the words are typed into the message. Uses Windows' own speech recogniser on this computer; nothing is recorded or sent.">&#127908;</button>
               <span class="mic-note" id="micNote"></span>
@@ -122,22 +134,22 @@
         </section>
 
         <div class="splitter" data-side="right"></div>
-        <aside id="right">
+        <aside id="right" data-slot="right" data-slot-name="Side column">
           <!-- Widgets: each its own panel, shown or hidden with the Widgets button at the bottom of the column. -->
           <section class="panel widget" data-panel="wg-time">
-            <h3 draggable="true">Time<button class="wg-x right" data-hide="time" title="Hide this widget. Bring it back with the Widgets button at the bottom of this column.">&#10005;</button></h3>
+            <h3 draggable="true">Time<button class="wg-x right" data-hide="time" title="Hide this widget. Bring it back with the Widgets button at the top of the window.">&#10005;</button></h3>
             <div class="panel-body widgets"><div class="wg-status"><i class="wg-orb" id="wgOrb"></i><div><b>Claude</b><span id="wgState">Idle</span></div><div class="wg-clock" id="wgClock">--:--</div></div><div class="wg-date" id="wgDate"></div><div id="wgZones"></div><div class="wg-add"><select id="wgZonePick" title="Add another time zone"></select></div></div>
           </section>
           <section class="panel widget" data-panel="wg-calendar">
-            <h3 draggable="true">Calendar<button class="wg-x right" data-hide="calendar" title="Hide this widget. Bring it back with the Widgets button at the bottom of this column.">&#10005;</button></h3>
-            <div class="panel-body widgets"><div class="sub" id="wgMonth"></div><div class="wg-cal" id="wgCal"></div></div>
+            <h3 draggable="true">Calendar<button class="wg-x right" data-hide="calendar" title="Hide this widget. Bring it back with the Widgets button at the top of the window.">&#10005;</button></h3>
+            <div class="panel-body widgets"><div class="sub cal-head" id="wgMonth"></div><div class="wg-cal" id="wgCal"></div><div class="cal-nexts" id="wgDue"></div></div>
           </section>
           <section class="panel widget" data-panel="wg-chat">
-            <h3 draggable="true">This chat<button class="wg-x right" data-hide="chat" title="Hide this widget. Bring it back with the Widgets button at the bottom of this column.">&#10005;</button></h3>
+            <h3 draggable="true">This chat<button class="wg-x right" data-hide="chat" title="Hide this widget. Bring it back with the Widgets button at the top of the window.">&#10005;</button></h3>
             <div class="panel-body widgets"><div class="wg-stats" id="wgStats"></div></div>
           </section>
           <section class="panel widget" data-panel="wg-today">
-            <h3 draggable="true">Today<button class="wg-x right" data-hide="today" title="Hide this widget. Bring it back with the Widgets button at the bottom of this column.">&#10005;</button></h3>
+            <h3 draggable="true">Today<button class="wg-x right" data-hide="today" title="Hide this widget. Bring it back with the Widgets button at the top of the window.">&#10005;</button></h3>
             <div class="panel-body widgets"><div class="wg-stats" id="wgToday"></div></div>
           </section>
           <section class="panel" data-panel="deck">
@@ -202,19 +214,24 @@
               <div id="library">
                 <div class="sub">Up next<span class="right" id="queueCount"></span><button class="text-btn" id="queueClear" title="Empty the queue">Clear</button></div>
                 <div class="songs short" id="queue"></div>
-                <div class="sub">Songs<span class="right" id="songCount"></span></div>
+                <div class="sub"><span id="songsTitle">Songs</span><span class="right" id="songCount"></span><button class="text-btn" id="songColsBtn" title="Choose what the list shows for each song">Columns</button></div>
+                <div class="song-cols hidden" id="songColsBox"></div>
                 <input id="songSearch" type="search" placeholder="Search name, artist, album, genre..." />
                 <div class="filters">
                   <select id="songArtist" title="Show one artist"></select>
                   <select id="songGenre" title="Show one genre"></select>
+                  <select id="songAlbum" title="Show one album"></select>
                   <select id="songGroup" title="Show one folder: an artist's or a collection's"></select>
                 </div>
+                <div class="song-head" id="songHead"></div>
                 <div class="songs" id="songs"></div>
+                <div class="sub" id="playlistsHead">Playlists</div>
+                <div id="playlists"></div>
                 <div class="sub">Music folders</div>
                 <div id="musicFolders"></div>
                 <div class="deck-row two">
                   <button class="deck-btn" id="addMusic" title="Add another folder of music">+ Add folder</button>
-                  <button class="deck-btn" id="importPlaylist" title="Queue the songs of a playlist file (.m3u, .m3u8, .pls)">Import playlist</button>
+                  <button class="deck-btn" id="importPlaylist" title="Add a playlist file (.m3u, .m3u8, .pls). It stays in the list of playlists until you take it out.">Import playlist</button>
                 </div>
               </div>
             </div>
@@ -232,6 +249,9 @@
               <div class="levels" id="effort"></div>
               <label class="switch" id="fastWrap" title="Faster answers on models that offer it. Uses more of your plan.">
                 <input type="checkbox" id="fast" /><span>Fast mode</span><em id="fastHint"></em>
+              </label>
+              <label class="switch" title="Claude can open, read and click pages in your everyday Chrome, where you are already signed in to your sites. Needs Anthropic's 'Claude' add-on installed in Chrome. This is not the Browser button, which opens a separate browser of Cla-Amp's own.">
+                <input type="checkbox" id="useChrome" /><span>Let Claude use my Chrome</span><em id="useChromeHint">needs the Claude add-on for Chrome</em>
               </label>
               <div class="hint bad hidden" id="engineError"></div>
             </div>
@@ -262,13 +282,12 @@
               <div id="plugins"></div>
             </div>
           </section>
-          <div class="wg-chooser">
-            <button class="deck-btn wide" id="wgChoose" title="Choose which widgets show in this column">Widgets&hellip;</button>
-            <div class="wg-menu hidden" id="wgMenu"></div>
-          </div>
         </aside>
-        <aside id="right2" aria-label="Second column of panels"></aside>
+        <div class="splitter" data-side="right2"></div>
+        <aside id="right2" data-slot="right2" data-slot-name="Second side column" aria-label="Second column of panels"></aside>
       </main>
+      <!-- The Widgets menu: opens under its button in the title bar. -->
+      <div class="wg-menu hidden" id="wgMenu"></div>
 
       <div id="videoWin" class="hidden">
         <div class="video-bar"><span id="videoName">Video</span><button class="chrome-btn close" id="videoClose">&#10005;</button></div>

@@ -3,6 +3,7 @@
 import { execFile, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import readline from 'node:readline'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -63,7 +64,8 @@ const SHOT = IS_DEV ? process.argv.find(arg => arg.startsWith('--shot='))?.slice
 // For the hidden screenshot test: how long to wait, and how tall a window.
 const numberArg = (name, fallback) => Number(process.argv.find(arg => arg.startsWith(`--${name}=`))?.split('=')[1]) || fallback
 const AUDIO = /\.(mp3|wav|m4a|wma|flac|aac)$/i
-const MODES = ['default', 'acceptEdits', 'plan']
+// 'auto': Claude Code's own checker decides each step and asks the person only when it cannot.
+const MODES = ['default', 'acceptEdits', 'auto', 'plan']
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 // A process started only to answer the panels is ended after this long idle.
 const SLEEP_AFTER = 10 * 60 * 1000
@@ -212,7 +214,8 @@ const shapeUsage = usage => {
       rows.push({ label, percent: isKnown ? percent : null, resetsAt: resetsAt ?? null })
     }
   }
-  add('5-hour session', limits.five_hour?.utilization, limits.five_hour?.resets_at, true)
+  // Not every plan has a 5-hour window: the row shows only when the plan reports one.
+  add('5-hour session', limits.five_hour?.utilization, limits.five_hour?.resets_at, limits.five_hour !== null && limits.five_hour !== undefined)
   add('Week, all models', limits.seven_day?.utilization, limits.seven_day?.resets_at, true)
 
   // One weekly row per model the plan counts on its own (Fable, for one).
@@ -346,6 +349,53 @@ const flatten = content => {
  * the chat can show. Only the four common picture kinds, at most six a time.
  */
 const PICTURE_KINDS = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }
+// Files the person attached to a message. Pictures small enough are shown to
+// Claude directly; every file is also named by its path, for Claude to read.
+// Any number of files can go with a message. Only so many pictures are shown to Claude
+// directly in one message (the service limits that); the rest go by their path like other files.
+const ATTACH_PICTURES_MOST = 20
+const ATTACH_PICTURE_BYTES = 3500000
+const PICTURE_ENDS = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' }
+
+/** Only full paths of things that exist, each once. */
+const cleanFiles = files => {
+  const found = []
+
+  for (const one of Array.isArray(files) ? files : []) {
+    if (typeof one === 'string' && one.length < 1000 && path.isAbsolute(one) && !found.includes(one) && fs.existsSync(one)) {
+      found.push(one)
+    }
+  }
+
+  return found
+}
+
+/** A prompt is its text, or { text, files } when files are attached. */
+const promptLine = prompt => (typeof prompt === 'string' ? prompt : `${prompt.text || '(files only)'}  [+${prompt.files.length} ${prompt.files.length === 1 ? 'file' : 'files'}]`)
+
+/** What goes to Claude for a prompt: plain text, or text and picture blocks. */
+const promptContent = prompt => {
+  if (typeof prompt === 'string') {
+    return prompt
+  }
+
+  const list = prompt.files.map(one => `- ${one}`).join('\n')
+  const blocks = [{ type: 'text', text: `${prompt.text}${prompt.text ? '\n\n' : ''}Attached files:\n${list}` }]
+
+  for (const one of prompt.files) {
+    const kind = PICTURE_ENDS[path.extname(one).toLowerCase()]
+
+    try {
+      if (kind && blocks.length <= ATTACH_PICTURES_MOST && fs.statSync(one).size <= ATTACH_PICTURE_BYTES) {
+        blocks.push({ type: 'image', source: { type: 'base64', media_type: kind, data: fs.readFileSync(one).toString('base64') } })
+      }
+    } catch {
+      // A picture that cannot be read stays a path in the text.
+    }
+  }
+
+  return blocks
+}
 
 const picturesOf = content => {
   const found = []
@@ -404,7 +454,7 @@ const toEvents = (projectId, messages, ts) => {
           .join('\n')
 
         if (isMain && said !== '') {
-          push({ t: 'user', text: said })
+          push({ t: 'user', text: said, pictures: picturesOf(content) })
         }
 
         for (const block of content) {
@@ -464,6 +514,8 @@ class Session {
     this.queue = []
     this.isBusy = false
     this.isStopping = false
+    // True while the work in hand is being cut short so that a waiting message can go next.
+    this.isJumping = false
     this.status = 'waiting'
     this.detail = project.sessionId ? 'Ready to pick up where it left off' : 'Waiting for a prompt'
     this.asks = new Map()
@@ -492,34 +544,68 @@ class Session {
     this.status = status
     this.detail = detail ?? this.detail
     this.emit(
-      { t: 'status', status, detail: this.detail, agents: this.agentCount, queue: this.queue },
+      { t: 'status', status, detail: this.detail, agents: this.agentCount, queue: this.queue.map(promptLine) },
       false,
     )
   }
 
-  /** A prompt from the person: runs now, or waits its turn in the queue. */
-  submit(text) {
+  /**
+   * A prompt from the person: runs now, or waits its turn in the queue.
+   * `isNow`: it does not wait; the work in hand is cut short for it.
+   */
+  submit(text, files = [], isNow = false) {
+    const prompt = files.length > 0 ? { text, files } : text
+
     if (this.isBusy) {
-      this.queue.push(text)
+      this.queue.push(prompt)
       this.setStatus(this.status)
+
+      if (isNow) {
+        void this.sendNow(this.queue.length - 1)
+      }
 
       return
     }
 
-    this.begin(text)
+    this.begin(prompt)
   }
 
-  begin(text) {
+  /**
+   * A waiting message goes next, at once: it moves to the head of the queue
+   * and the work in hand is cut short, as Stop would, but the queue is kept.
+   * The other waiting messages follow in their order.
+   */
+  async sendNow(index) {
+    const [prompt] = Number.isInteger(index) ? this.queue.splice(index, 1) : []
+
+    if (prompt === undefined) {
+      return
+    }
+
+    this.queue.unshift(prompt)
+
+    if (this.query !== null && this.isBusy && !this.isStopping) {
+      this.isJumping = true
+      this.setStatus('working', 'Stopping for your message')
+      await this.query.interrupt().catch(() => {})
+    } else {
+      this.setStatus(this.status)
+    }
+  }
+
+  begin(prompt) {
     this.isBusy = true
     this.isStopping = false
-    this.emit({ t: 'user', text })
+    // Read once here, so the chat shows exactly what Claude is sent.
+    const content = promptContent(prompt)
+    this.emit(typeof content === 'string' ? { t: 'user', text: content } : { t: 'user', text: content[0].text, pictures: picturesOf(content) })
     this.setStatus('working', 'Thinking')
     const waiter = this.waiters.shift()
 
     if (waiter) {
-      waiter(text)
+      waiter(content)
     } else {
-      this.pending.push(text)
+      this.pending.push(content)
     }
 
     if (this.query === null) {
@@ -537,15 +623,15 @@ class Session {
 
   async *prompts(life) {
     for (;;) {
-      const text = await this.nextPrompt()
+      const content = await this.nextPrompt()
 
-      if (text === null || life !== this.life) {
+      if (content === null || life !== this.life) {
         return
       }
 
       yield {
         type: 'user',
-        message: { role: 'user', content: text },
+        message: { role: 'user', content },
         parent_tool_use_id: null,
         session_id: this.project.sessionId ?? '',
       }
@@ -553,6 +639,8 @@ class Session {
   }
 
   start() {
+    // Claude Code counts tokens and cost from the start of each process: so does this.
+    this.spent = { cost: 0, tokens: 0 }
     this.life += 1
     const life = this.life
     const project = this.project
@@ -576,6 +664,10 @@ class Session {
         settingSources: project.isTrusted === true ? ['user', 'project', 'local'] : ['user'],
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         canUseTool: (tool, input, options) => this.ask(tool, input, options),
+        // The person's own switch: Claude Code connects to the Claude in Chrome
+        // add-on they installed, so Claude can work in their Chrome. Off unless
+        // they turn it on; each use is still asked about like any other tool.
+        extraArgs: state.prefs.useChrome === true ? { chrome: null } : undefined,
         stderr: text => {
           if (process.env.CLAAMP_DEBUG) {
             process.stderr.write(text)
@@ -786,6 +878,7 @@ class Session {
     }
 
     if (message.type === 'result') {
+      noteSpend(this, message)
       // A process woken only to fill the panels can end a turn nobody asked for: not chat news.
       if (!this.isBusy) {
         return
@@ -808,13 +901,14 @@ class Session {
       this.emit({
         t: 'result',
         isOk,
-        wasStopped: this.isStopping,
+        wasStopped: this.isStopping || this.isJumping,
         cost: message.total_cost_usd,
         durationMs: message.duration_ms,
         turns: message.num_turns,
         contextWindow,
-        error: isOk || this.isStopping ? undefined : hint,
+        error: isOk || this.isStopping || this.isJumping ? undefined : hint,
       })
+      this.isJumping = false
       this.isBusy = false
       this.agents.clear()
       const next = this.queue.shift()
@@ -1155,12 +1249,23 @@ class Session {
   }
 
   async setMode(mode) {
+    const before = this.project.mode ?? 'default'
     this.project.mode = mode
     saveState()
 
     if (this.query !== null) {
-      await this.query.setPermissionMode(mode).catch(() => {})
+      try {
+        await this.query.setPermissionMode(mode)
+      } catch (error) {
+        // Auto is not offered for every account or model: the mode stays as it was, and the window says so.
+        this.project.mode = before
+        saveState()
+
+        return { error: String(error?.message ?? error).slice(0, 300), mode: before }
+      }
     }
+
+    return { mode }
   }
 }
 
@@ -1196,9 +1301,11 @@ const describe = project => {
     effort: project.effort || null,
     contextWindow: project.contextWindow ?? 0,
     hasSession: Boolean(project.sessionId),
+    // Which saved chat is open here: the window keeps a half-written message for each chat.
+    chatId: project.sessionId ?? null,
     status: session.status,
     detail: session.detail,
-    queue: session.queue,
+    queue: session.queue.map(promptLine),
     agents: session.agentCount,
   }
 }
@@ -1255,6 +1362,27 @@ const openClaudeConsole = (args, cwd) => {
   }
 }
 
+const BROWSER_ENDS = ['.html', '.htm', '.pdf', '.svg']
+
+/** The file a reply names: a full path, or one inside the project's folder. A line number after it is dropped. null when there is no such file. */
+const fileNamed = (id, name) => {
+  const project = state.projects.find(one => one.id === id)
+
+  if (typeof name !== 'string' || name.length > 600) {
+    return null
+  }
+
+  const plain = name.replace(/^file:\/\/\/?/i, '').replace(/[#?].*$/, '').replace(/:\d+(?::\d+)?$/, '')
+
+  try {
+    const file = path.isAbsolute(plain) ? path.normalize(plain) : project ? path.resolve(project.cwd, plain) : null
+
+    return file !== null && fs.statSync(file).isFile() ? file : null
+  } catch {
+    return null
+  }
+}
+
 const sameFolder = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase()
 
 /**
@@ -1265,6 +1393,50 @@ const sameFolder = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).t
  */
 /** The last few chats read from their files: chat id to { stamp, messages }. */
 const readChats = new Map()
+
+/** A project with nothing going on: no turn, no agents out, nothing waiting. */
+const isFree = project => {
+  const session = sessions.get(project.id)
+
+  return !session || !(session.isBusy || session.agentCount > 0 || session.queue.length > 0)
+}
+
+/** One more entry in the list for a folder that is already there, so a second chat can run in it. */
+const anotherFor = first => {
+  const count = state.projects.filter(one => sameFolder(one.cwd, first.cwd)).length
+  const project = {
+    id: randomUUID(),
+    name: `${String(first.name).replace(/ \(\d+\)$/, '')} (${count + 1})`,
+    cwd: first.cwd,
+    mode: first.mode ?? 'default',
+    sessionId: null,
+    isTrusted: first.isTrusted === true,
+  }
+  state.projects.push(project)
+  saveState()
+
+  return project
+}
+
+/**
+ * Where a saved chat of a folder opens. The entry that already holds it,
+ * else one for that folder with nothing going on (the one in view first),
+ * else a new entry for the same folder: a chat that is working is never
+ * pushed aside. `isOpen`: the chat is already open and at work there.
+ */
+const placeFor = (folder, sessionId, hint) => {
+  const here = state.projects.filter(one => sameFolder(one.cwd, folder))
+  const ours = state.copies?.[sessionId] ?? sessionId
+  const holding = here.find(one => one.sessionId === sessionId || one.sessionId === ours)
+
+  if (holding) {
+    return { project: holding, isOpen: !isFree(holding) }
+  }
+
+  const free = here.find(one => one.id === hint && isFree(one)) ?? here.find(isFree)
+
+  return here.length === 0 ? null : { project: free ?? anotherFor(here[0]), isOpen: false }
+}
 
 const openSaved = async (project, sessionId) => {
   const session = sessionOf(project.id)
@@ -1407,9 +1579,16 @@ const watchOutside = () => {
 
 const branchOf = cwd =>
   new Promise(resolve => {
-    execFile('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd, windowsHide: true }, (error, out) =>
-      resolve(error ? '' : out.trim()),
-    )
+    // The branch's name, also in a new repository with no commit yet; a
+    // checkout that is on no branch gives the short id of its commit.
+    execFile('git', ['branch', '--show-current'], { cwd, windowsHide: true }, (error, out) => {
+      if (error || out.trim() !== '') {
+        resolve(error ? '' : out.trim())
+
+        return
+      }
+      execFile('git', ['rev-parse', '--short', 'HEAD'], { cwd, windowsHide: true }, (failed, id) => resolve(failed ? '' : id.trim()))
+    })
   })
 
 // ------------------------------------------------------- look, about, guides
@@ -1547,7 +1726,7 @@ const summarizeSettings = file => {
  * in it is read.
  */
 let playerHelper = null
-let playerState = { count: 0, hidden: false, shown: 0, hasClaude: false }
+let playerState = { count: 0, hidden: false, shown: 0, hasClaude: false, hasPages: false }
 // Cla-Amp was maximised and gave the player its strip of the screen: where it was before.
 let dockedFrom = null
 let isFitting = false
@@ -1555,6 +1734,64 @@ const PLAYER_LEAST = 340
 let isRestarting = false
 // The person said yes to closing while Claude works; not asked twice.
 let isCloseAgreed = false
+// Set while a restart waits for the work here to finish.
+let idleRestart = null
+const busySessions = () => [...sessions.values()].filter(one => one.isBusy || one.agentCount > 0 || one.queue.length > 0)
+
+const restartNow = () => {
+  let isGone = false
+  const go = () => {
+    if (!isGone) {
+      isGone = true
+      playerHelper?.kill()
+      app.relaunch()
+      app.quit()
+    }
+  }
+
+  // The player is let go first, so the music plays on; the new run takes it back.
+  if (playerHelper === null) {
+    go()
+  } else {
+    isRestarting = true
+    playerHelper.once('exit', go)
+    playerSay('release')
+    setTimeout(go, 2500)
+  }
+}
+
+/** After "Restart now and carry on": each chat that was working is told to go on, and its waiting messages are sent again. */
+const CARRY_ON =
+  'Cla-Amp was restarted to update itself, which stopped your last turn partway. Check what was already done, then carry on from where you stopped. Agents that were running in the background were stopped too; start them again only if their work is still needed.'
+
+const carryOn = () => {
+  const list = Array.isArray(state.carryOn) ? state.carryOn : []
+
+  if (state.carryOn !== undefined) {
+    delete state.carryOn
+    saveState()
+  }
+
+  for (const one of IS_DEMO ? [] : list) {
+    const session = sessionOf(one?.id)
+
+    if (!session) {
+      continue
+    }
+
+    if (one.wasWorking === true) {
+      session.submit(CARRY_ON)
+    }
+
+    for (const prompt of Array.isArray(one.queue) ? one.queue : []) {
+      if (typeof prompt === 'string') {
+        session.submit(prompt)
+      } else if (typeof prompt?.text === 'string') {
+        session.submit(prompt.text, cleanFiles(prompt.files))
+      }
+    }
+  }
+}
 let tray = null
 
 /**
@@ -1567,7 +1804,7 @@ const refreshTray = () => {
     return
   }
 
-  const hasDocked = playerState.count > 0 || playerState.hasClaude
+  const hasDocked = playerState.count > 0 || playerState.hasClaude || playerState.hasPages
   tray.setContextMenu(
     Menu.buildFromTemplate([
       {
@@ -1588,7 +1825,7 @@ const refreshTray = () => {
         },
       },
       { type: 'separator' },
-      { label: 'Quit Cla-Amp (closes its player and claude.ai windows too)', click: () => win.close() },
+      { label: 'Quit Cla-Amp (closes its player, claude.ai and browser windows too)', click: () => win.close() },
     ]),
   )
 }
@@ -1615,8 +1852,61 @@ const startTray = () => {
 let placeTimer = null
 // YouTube Music's page fits a narrow window. Spotify's does not: below about
 // 800 its sign-in button and song lists are cut off.
-const PLAYER_WIDTH = { ytm: 460, spotify: 900, claude: 960 }
+const PLAYER_WIDTH = { ytm: 460, spotify: 900, claude: 960, pages: 960 }
 const playerProfile = () => path.join(dataDir(), 'player-profile')
+// The profile of Cla-Amp's browser: its own, apart from the players' and from the person's everyday browser.
+const pagesProfile = () => path.join(dataDir(), 'pages-profile')
+
+/** How wide the attached window is: the width the person dragged it to, else the one that suits its page. */
+const playerWidth = () => {
+  const site = state.prefs.playerSite
+  const own = Number(state.prefs.playerWidths?.[site])
+
+  return own >= PLAYER_LEAST ? own : (PLAYER_WIDTH[site] ?? PLAYER_WIDTH.ytm)
+}
+let widthTimer = null
+
+/** Remembers a width for the window on show. Saved a moment later, so a drag does not write the file at every step. */
+const keepPlayerWidth = width => {
+  const site = ['ytm', 'spotify', 'claude', 'pages'].includes(state.prefs.playerSite) ? state.prefs.playerSite : 'ytm'
+  state.prefs.playerWidths = { ...(state.prefs.playerWidths ?? {}), [site]: Math.round(width) }
+  clearTimeout(widthTimer)
+  widthTimer = setTimeout(saveState, 800)
+}
+
+/**
+ * The person dragged the attached window to a new width (in screen pixels):
+ * the two windows stay locked side by side, so Cla-Amp gives up or takes
+ * back the difference.
+ */
+const playerDragged = pixels => {
+  if (isFitting || win === null || win.isDestroyed() || win.isMinimized() || win.isFullScreen() || win.isMaximized()) {
+    return
+  }
+
+  const own = win.getBounds()
+  const area = screen.getDisplayMatching(own).workArea
+  const least = win.getMinimumSize()[0]
+  const asked = screen.screenToDipRect(win, { x: 0, y: 0, width: pixels, height: 1 }).width
+  const width = Math.round(Math.max(PLAYER_LEAST, Math.min(asked, area.width - least)))
+  const right = area.x + area.width
+  keepPlayerWidth(width)
+  isFitting = true
+
+  try {
+    if (dockedFrom !== null) {
+      // The two fill the screen: Cla-Amp takes what the other leaves.
+      win.setBounds({ x: area.x, y: area.y, width: area.width - width, height: area.height })
+    } else if (own.x + own.width + width > right && own.x - width < area.x) {
+      // No room beside Cla-Amp for the new width: Cla-Amp narrows, down to its smallest.
+      const mine = Math.max(least, right - width - Math.max(own.x, area.x))
+      win.setBounds({ x: Math.max(area.x, Math.min(own.x, right - width - mine)), y: own.y, width: mine, height: own.height })
+    }
+  } finally {
+    isFitting = false
+  }
+  placePlayer()
+}
 
 const playerSay = line => {
   if (playerHelper !== null && playerHelper.stdin.writable) {
@@ -1638,7 +1928,7 @@ const makeRoom = () => {
   const isMax = win.isMaximized()
   const own = win.getBounds()
   const area = screen.getDisplayMatching(own).workArea
-  const want = PLAYER_WIDTH[state.prefs.playerSite] ?? PLAYER_WIDTH.ytm
+  const want = playerWidth()
   const least = win.getMinimumSize()[0]
   const width = Math.min(want, area.width - least)
 
@@ -1693,10 +1983,18 @@ const playerRect = () => {
 
   const own = win.getBounds()
   const area = screen.getDisplayMatching(own).workArea
-  const want = Math.min(PLAYER_WIDTH[state.prefs.playerSite] ?? PLAYER_WIDTH.ytm, area.width)
+  const want = Math.min(playerWidth(), area.width)
   const beside = area.x + area.width - (own.x + own.width)
+  // While the two fill the screen, the attached window takes all that Cla-Amp
+  // leaves: drag Cla-Amp's edge and the other follows, and keeps that width.
+  const isLocked = dockedFrom !== null && !isFitting && beside >= PLAYER_LEAST
+
+  if (isLocked && Math.abs(beside - want) > 2) {
+    keepPlayerWidth(beside)
+  }
+
   // Narrower than it likes, when that is what fits beside Cla-Amp.
-  const width = beside >= want || own.x - want >= area.x || beside < PLAYER_LEAST ? want : beside
+  const width = isLocked ? beside : beside >= want || own.x - want >= area.x || beside < PLAYER_LEAST ? want : beside
   const y = Math.max(own.y, area.y)
   const height = Math.max(Math.min(own.y + own.height, area.y + area.height) - y, 200)
   const x = own.x + own.width + width <= area.x + area.width ? own.x + own.width : own.x - width >= area.x ? own.x - width : area.x + area.width - width
@@ -1730,14 +2028,24 @@ const startPlayerHelper = () => {
     path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ['-NoProfile', '-Command', '& ([scriptblock]::Create([IO.File]::ReadAllText($env:CA_SCRIPT)))'],
     {
-      env: { ...process.env, CA_SCRIPT: path.join(ROOT, 'deck', 'player-window.ps1'), CA_PROFILE: playerProfile(), CA_OWNER: String(owner) },
+      env: { ...process.env, CA_SCRIPT: path.join(ROOT, 'deck', 'player-window.ps1'), CA_PROFILE: playerProfile(), CA_PAGES: pagesProfile(), CA_OWNER: String(owner) },
       windowsHide: true,
-      stdio: ['pipe', 'pipe', 'ignore'],
+      stdio: ['pipe', 'pipe', IS_DEV && process.env.CA_DEBUG ? 'inherit' : 'ignore'],
     },
   )
   playerHelper = helper
   helper.stdin.on('error', () => {})
   readline.createInterface({ input: helper.stdout }).on('line', line => {
+    if (line.startsWith('#width ')) {
+      const pixels = Number(line.slice(7))
+
+      if (pixels > 0) {
+        playerDragged(pixels)
+      }
+
+      return
+    }
+
     if (line.startsWith('@')) {
       try {
         const said = JSON.parse(line.slice(1))
@@ -1745,10 +2053,12 @@ const startPlayerHelper = () => {
         const sites = Array.isArray(said.sites) ? said.sites : []
         // count: the music players' windows; the claude.ai window is told apart.
         playerState = {
-          count: Array.isArray(said.sites) ? sites.filter(one => one !== 'claude').length : Number(said.count) || 0,
+          count: Array.isArray(said.sites) ? sites.filter(one => one !== 'claude' && one !== 'pages').length : Number(said.count) || 0,
           hidden: said.hidden === true,
           shown: Number(said.shown) || 0,
           hasClaude: sites.includes('claude'),
+          claudeCount: sites.filter(one => one === 'claude').length,
+          hasPages: sites.includes('pages'),
         }
         playerSites = sites
         tellBrowserSite()
@@ -1766,7 +2076,7 @@ const startPlayerHelper = () => {
   helper.on('exit', () => {
     if (playerHelper === helper) {
       playerHelper = null
-      playerState = { count: 0, hidden: false, shown: 0, hasClaude: false }
+      playerState = { count: 0, hidden: false, shown: 0, hasClaude: false, hasPages: false }
       playerSites = []
       tellBrowserSite()
       playerCameOrWent()
@@ -1775,7 +2085,7 @@ const startPlayerHelper = () => {
     }
   })
 
-  playerSay(`site ${['spotify', 'claude'].includes(state.prefs.playerSite) ? state.prefs.playerSite : 'ytm'}`)
+  playerSay(`site ${['spotify', 'claude', 'pages'].includes(state.prefs.playerSite) ? state.prefs.playerSite : 'ytm'}`)
 
   if (state.prefs.playerHidden === true) {
     playerSay('hide')
@@ -1828,7 +2138,7 @@ const startDeck = () => {
     path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ['-NoProfile', '-Command', '& ([scriptblock]::Create([IO.File]::ReadAllText($env:CA_DECK)))'],
     {
-      env: { ...process.env, CA_CMD: deckFile(), CA_DECK: path.join(ROOT, 'deck', 'deck.ps1'), CA_FAST: '1', CA_PROFILE: playerProfile() },
+      env: { ...process.env, CA_CMD: deckFile(), CA_DECK: path.join(ROOT, 'deck', 'deck.ps1'), CA_FAST: '1', CA_PROFILE: playerProfile(), CA_PAGES: pagesProfile() },
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'ignore'],
     },
@@ -1886,7 +2196,10 @@ const musicFolders = () => {
   return saved.filter(one => typeof one === 'string').slice(0, 40)
 }
 
-/** Every song in the person's music folders, with its details. Details are kept between runs. */
+/** The playlist files the person imported: kept until they take one out of the app. */
+const playlistFiles = () => (Array.isArray(state.prefs.playlists) ? state.prefs.playlists.filter(one => typeof one === 'string').slice(0, 40) : [])
+
+/** Every song in the person's music folders, and their playlists, with details. Details are kept between runs. */
 const scanSongs = () => {
   if (tagCache === null) {
     try {
@@ -1900,13 +2213,32 @@ const scanSongs = () => {
   const folders = musicFolders()
   const files = scanFolders(folders, tagCache)
   knownSongs = new Set(files.map(one => one.path))
+  // Each playlist is read again from its file, so it follows what the file says now.
+  const playlists = playlistFiles().map(file => {
+    let songs = []
+    let isMissing = false
+
+    try {
+      songs = readPlaylist(file)
+        .map(one => describeSong(one, tagCache))
+        .filter(Boolean)
+    } catch {
+      isMissing = true
+    }
+
+    for (const song of songs) {
+      knownSongs.add(song.path)
+    }
+
+    return { file, name: path.basename(file).replace(/\.[^.]+$/, ''), files: songs, isMissing }
+  })
 
   if (JSON.stringify(tagCache) !== before) {
     fs.mkdirSync(dataDir(), { recursive: true })
     fs.writeFile(tagFile(), JSON.stringify(tagCache), () => {})
   }
 
-  return { folders, files }
+  return { folders, files, playlists }
 }
 
 // ---------------------------------------------------------------------- skins
@@ -2326,6 +2658,25 @@ const madeHere = (sessionId, cwd) => {
   return madeHereKept.get(sessionId) && !deskChats().has(sessionId)
 }
 
+// A theme's later layout settings, each cleaned to what the window itself would keep. undefined: not in the theme.
+const themeSwitch = value => (['0', '1', ''].includes(value) ? value : undefined)
+const themeWidth = value => (value === '' ? '' : typeof value === 'string' && /^\d{3}$/.test(value) && Number(value) >= 200 && Number(value) <= 900 ? value : undefined)
+const themeText = (value, clean) => {
+  if (value === '') {
+    return ''
+  }
+
+  if (typeof value !== 'string' || value.length > 6000) {
+    return undefined
+  }
+
+  try {
+    return JSON.stringify(clean(JSON.parse(value)))
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * Archives or deletes a chat that was made in this app. A chat from the
  * desktop app or a terminal is refused, and so is one that is open here.
@@ -2389,6 +2740,35 @@ const cleanTheme = raw => {
     zones: words(layout.zones, 5, 60),
     playerSize: ['s', 'm', 'l'].includes(layout.playerSize) ? layout.playerSize : undefined,
     col2: ['0', '1', 0, 1].includes(layout.col2) ? String(layout.col2) : undefined,
+    // Kept as the window keeps them: short strings ('' for "not set"), the two lists as text.
+    places: themeText(layout.places, value => {
+      const slots = ['brand', 'transport', 'statusbar', 'centerTop', 'leftBottom', 'right', 'right2']
+
+      return Object.fromEntries(slots.filter(slot => Array.isArray(value?.[slot])).map(slot => [slot, value[slot].filter(one => typeof one === 'string' && /^[\w:-]{1,40}$/.test(one)).slice(0, 40)]))
+    }),
+    layout: themeText(layout.layout, value => {
+      const picks = { projects: ['left', 'right'], panels: ['right', 'left'], status: ['top', 'bottom'], eq: ['m', 's', 'l'] }
+
+      return {
+        ...Object.fromEntries(Object.entries(picks).filter(([key, allowed]) => allowed.includes(value?.[key])).map(([key]) => [key, value[key]])),
+        // A typeface's name only: the window offers it when it is one it knows.
+        ...(typeof value?.font === 'string' && /^[\w .-]{1,40}$/.test(value.font) ? { font: value.font } : {}),
+      }
+    }),
+    sideTall: themeSwitch(layout.sideTall),
+    'hide-left': themeSwitch(layout['hide-left']),
+    'hide-right': themeSwitch(layout['hide-right']),
+    topPlayer: themeSwitch(layout.topPlayer),
+    'width-left': themeWidth(layout['width-left']),
+    'width-right': themeWidth(layout['width-right']),
+    'width-right2': themeWidth(layout['width-right2']),
+    sideLinked: themeSwitch(layout.sideLinked),
+    // The panels put away: their names only.
+    hiddenPanels: themeText(layout.hiddenPanels, value => (Array.isArray(value) ? value.filter(one => typeof one === 'string' && /^[\w-]{1,30}$/.test(one)).slice(0, 30) : [])),
+    // Which parts of the status bar show: known names, each on or off.
+    statusItems: themeText(layout.statusItems, value =>
+      Object.fromEntries(['agents', 'context', 'branch', 'model', 'effort', 'limits', 'date', 'time', 'state'].filter(id => typeof value?.[id] === 'boolean').map(id => [id, value[id]])),
+    ),
   }
 
   return {
@@ -2449,6 +2829,157 @@ const saveTheme = raw => {
 // that changed today (the last four megabytes), at most once a minute.
 const todayKept = { at: 0, said: null }
 
+// What each chat's Claude Code is using of the computer: processor and memory,
+// for the list of working chats. Windows is asked for its process list (ids,
+// memory, processor time; names only for Claude Code's own processes), and
+// each chat's process is summed with everything it started (commands,
+// connectors). Agents run inside their chat's process, so they are part of
+// its numbers and cannot be told apart.
+const LOAD_ASK =
+  "Get-CimInstance Win32_Process | ForEach-Object { $r = ''; if ($_.Name -eq 'claude.exe' -and [string]$_.CommandLine -match '--resume[= ]([0-9a-f-]{36})') { $r = $Matches[1] }; '{0}|{1}|{2}|{3}|{4}|{5}' -f $_.ProcessId, $_.ParentProcessId, $_.WorkingSetSize, ([uint64]$_.KernelModeTime + [uint64]$_.UserModeTime), $_.Name, $r }"
+const loadKept = { at: 0, times: new Map(), said: {}, isAsking: false }
+
+const workLoad = () =>
+  new Promise(resolve => {
+    if (process.platform !== 'win32' || IS_DEMO || loadKept.isAsking || Date.now() - loadKept.at < 3000) {
+      resolve(loadKept.said)
+
+      return
+    }
+
+    loadKept.isAsking = true
+    execFile(
+      path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      ['-NoProfile', '-Command', LOAD_ASK],
+      { windowsHide: true, timeout: 15000, maxBuffer: 8 * 1024 * 1024 },
+      (_error, out) => {
+        loadKept.isAsking = false
+        const now = Date.now()
+        const all = new Map()
+        const children = new Map()
+
+        for (const line of String(out ?? '').split(/\r?\n/)) {
+          const [id, parent, memory, time, name, resume] = line.split('|')
+
+          if (name === undefined || !(Number(id) > 0)) {
+            continue
+          }
+
+          all.set(Number(id), { id: Number(id), memory: Number(memory) || 0, time: Number(time) || 0, name, resume })
+          children.set(Number(parent), [...(children.get(Number(parent)) ?? []), Number(id)])
+        }
+
+        // A chat's process and everything under it.
+        const sum = root => {
+          let memory = 0
+          let time = 0
+          let count = 0
+          const seen = new Set()
+          const walk = id => {
+            const one = all.get(id)
+
+            if (!one || seen.has(id) || seen.size > 400) {
+              return
+            }
+            seen.add(id)
+            memory += one.memory
+            time += one.time
+            count += 1
+            ;(children.get(id) ?? []).forEach(walk)
+          }
+          walk(root)
+
+          return { memory, time, count }
+        }
+        const roots = (children.get(process.pid) ?? []).map(id => all.get(id)).filter(one => one?.name === 'claude.exe')
+        const said = {}
+        const times = new Map()
+        const span = (now - loadKept.at) / 1000
+        const cores = Math.max(1, os.cpus().length)
+        const open = [...sessions.values()].filter(one => one.query)
+        const left = new Set(roots.map(one => one.id))
+        const tell = (session, root) => {
+          const total = sum(root.id)
+          const before = loadKept.times.get(root.id)
+          left.delete(root.id)
+          times.set(root.id, total.time)
+          said[session.project.id] = {
+            // Share of the whole processor, all its cores together, since the look before.
+            cpu: before !== undefined && span > 0 && span < 60 ? Math.max(0, Math.round((((total.time - before) / 1e7 / span) * 100) / cores)) : null,
+            mb: Math.round(total.memory / 1048576),
+            count: total.count,
+          }
+        }
+
+        for (const session of open) {
+          const root = roots.find(one => one.resume && one.resume === session.project.sessionId)
+
+          if (root) {
+            tell(session, root)
+          }
+        }
+
+        // A new chat's process carries no name yet: when just one of each is left, they belong together.
+        const unnamed = open.filter(one => said[one.project.id] === undefined)
+
+        if (unnamed.length === 1 && left.size === 1) {
+          tell(unnamed[0], all.get([...left][0]))
+        }
+
+        loadKept.at = now
+        loadKept.times = times
+        loadKept.said = said
+        resolve(said)
+      },
+    )
+  })
+
+const two = number => String(number).padStart(2, '0')
+const dayKeyOf = date => `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}`
+let spendTimer = null
+
+/**
+ * Adds a finished turn's tokens and cost to the day's tally, for the
+ * calendar. The numbers are Claude Code's own: its running totals for the
+ * process, so each turn adds what is new since the turn before. The cost is
+ * what the tokens would cost at API prices; a plan is not billed this way.
+ */
+const noteSpend = (session, message) => {
+  const models = Object.values(message.modelUsage ?? {})
+  const sum = pick => models.reduce((total, one) => total + (Number(one?.[pick]) || 0), 0)
+  const now = {
+    cost: Number(message.total_cost_usd) || 0,
+    input: sum('inputTokens'),
+    output: sum('outputTokens'),
+    cacheRead: sum('cacheReadInputTokens'),
+    cacheWrite: sum('cacheCreationInputTokens'),
+  }
+  const before = session.spent ?? { cost: 0 }
+  // A total lower than the one before means a new count began.
+  const isNew = now.cost < (before.cost ?? 0)
+  const more = key => Math.max(0, now[key] - (isNew ? 0 : before[key] ?? 0))
+  session.spent = now
+
+  if (IS_DEMO || more('cost') + more('input') + more('output') + more('cacheRead') + more('cacheWrite') === 0) {
+    return
+  }
+
+  const days = (state.days ??= {})
+  const day = (days[dayKeyOf(new Date())] ??= { cost: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0 })
+
+  for (const key of ['cost', 'input', 'output', 'cacheRead', 'cacheWrite']) {
+    day[key] = (day[key] ?? 0) + more(key)
+  }
+  day.turns = (day.turns ?? 0) + 1
+
+  // About a year is kept.
+  for (const old of Object.keys(days).sort().slice(0, -400)) {
+    delete days[old]
+  }
+  clearTimeout(spendTimer)
+  spendTimer = setTimeout(saveState, 1500)
+}
+
 const todayStats = async () => {
   if (Date.now() - todayKept.at < 55000 && todayKept.said) {
     return todayKept.said
@@ -2486,7 +3017,8 @@ const todayStats = async () => {
     }
   }
   todayKept.at = Date.now()
-  todayKept.said = { chats: chats.length, prompts }
+  // The names of the chats too, for the calendar's report of the day.
+  todayKept.said = { chats: chats.length, prompts, titles: chats.slice(0, 40).map(titleOf) }
 
   return todayKept.said
 }
@@ -2543,8 +3075,35 @@ const handlers = {
     saveState()
   },
   'project:transcript': id => (state.projects.some(one => one.id === id) ? readTranscript(id) : []),
-  'project:send': (id, text) => sessionOf(id)?.submit(String(text)),
+  'project:send': (id, text, files, isNow) => sessionOf(id)?.submit(String(text), cleanFiles(files), isNow === true),
+  // "Attach": the person picks files; only their paths come back.
+  'attach:pick': async () => {
+    const picked = await dialog.showOpenDialog(win, { title: 'Attach files', properties: ['openFile', 'multiSelections'] })
+
+    return picked.canceled ? [] : cleanFiles(picked.filePaths)
+  },
+  // A picture pasted from the clipboard has no file, so it is saved in this app's own folder first.
+  'attach:paste': dataUrl => {
+    const found = /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/=]+)$/.exec(typeof dataUrl === 'string' && dataUrl.length < 16000000 ? dataUrl : '')
+
+    if (!found) {
+      return null
+    }
+
+    const folder = path.join(dataDir(), 'attachments')
+    const file = path.join(folder, `pasted-${createHash('sha1').update(found[2]).digest('hex').slice(0, 12)}.${PICTURE_KINDS[found[1]]}`)
+    fs.mkdirSync(folder, { recursive: true })
+    fs.writeFileSync(file, Buffer.from(found[2], 'base64'))
+
+    return file
+  },
   'project:stop': id => sessionOf(id)?.stop(),
+  // What is saved about a project (its model and effort among it), answered at once: no Claude Code process is started for it.
+  'project:describe': id => {
+    const project = state.projects.find(one => one.id === id)
+
+    return project ? describe(project) : null
+  },
   'project:new': id => sessionOf(id)?.reset(),
   'project:mode': (id, mode) => (MODES.includes(mode) ? sessionOf(id)?.setMode(mode) : undefined),
   'project:permission': (id, askId, decision, answers) => sessionOf(id)?.decide(askId, decision, answers),
@@ -2576,8 +3135,29 @@ const handlers = {
   // Opens a saved conversation and continues it, whichever app made it.
   'sessions:open': async (id, sessionId) => {
     const project = state.projects.find(one => one.id === id)
+    const place = project ? placeFor(project.cwd, String(sessionId), id) : null
 
-    return project ? openSaved(project, String(sessionId)) : null
+    if (!place) {
+      return null
+    }
+
+    return place.isOpen ? { project: describe(place.project), isOpen: true } : openSaved(place.project, String(sessionId))
+  },
+  // A new chat in the same folder beside one that is working: one more entry in the list.
+  'project:another': id => {
+    const project = state.projects.find(one => one.id === id)
+
+    if (!project) {
+      return null
+    }
+
+    const free = state.projects.find(one => one.id !== id && sameFolder(one.cwd, project.cwd) && isFree(one))
+
+    if (free) {
+      sessionOf(free.id)?.reset()
+    }
+
+    return describe(free ?? anotherFor(project))
   },
   // A new chat that holds this one up to one of Claude's replies; the first stays as it is.
   'chats:fork': (id, uuid) =>
@@ -2688,11 +3268,13 @@ const handlers = {
 
       return saved.error ? { error: 'That file is not a Cla-Amp theme.' } : saved
     }),
-  'today:stats': () => guarded(() => todayStats()),
+  // Processor and memory used by each chat's Claude Code, by project id. Asked only while the list of working chats is open.
+  'work:load': () => workLoad(),
+  'today:stats': () => guarded(async () => ({ ...(await todayStats()), spend: state.days?.[dayKeyOf(new Date())] ?? null })),
   'chats:archive': (sessionId, cwd) => guarded(() => putAway(sessionId, cwd, false)),
   'chats:delete': (sessionId, cwd) => guarded(() => putAway(sessionId, cwd, true)),
   // Opens a chat from the Chats tab, adding its folder as a project if it is not one yet.
-  'chats:open': async (sessionId, cwd) => {
+  'chats:open': async (sessionId, cwd, hint) => {
     const id = String(sessionId)
     let folder = realFolder(cwd)
 
@@ -2718,16 +3300,18 @@ const handlers = {
       return { error: 'That chat is not saved for this folder any more.' }
     }
 
-    let project = state.projects.find(one => sameFolder(one.cwd, folder))
+    let place = placeFor(folder, String(sessionId), hint)
 
-    if (!project) {
-      project = { id: randomUUID(), name: path.basename(folder), cwd: folder, mode: 'default', sessionId: null }
+    if (!place) {
+      const project = { id: randomUUID(), name: path.basename(folder), cwd: folder, mode: 'default', sessionId: null }
       project.isTrusted = await askTrust(folder)
       state.projects.push(project)
       saveState()
+      place = { project, isOpen: false }
     }
 
-    return openSaved(project, String(sessionId))
+    // Already open and at work here: the window only goes to it.
+    return place.isOpen ? { project: describe(place.project), isOpen: true } : openSaved(place.project, String(sessionId))
   },
   // Usage, models and connectors for one project. Its Claude Code process is
   // started for this if it is not running; other idle ones are put to sleep.
@@ -2994,6 +3578,22 @@ const handlers = {
 
     return { isAuto: true, isShown: !isOnShow }
   },
+  // The Browser button: opens Cla-Amp's browser, brings it back, or tucks it away.
+  'pages:toggle': async () => {
+    if (!playerState.hasPages) {
+      return (await openPage(null)) ? { isShown: true } : { error: 'No Chrome, Edge or Brave was found.' }
+    }
+
+    const isOnShow = state.prefs.playerSite === 'pages' && !playerState.hidden
+    state.prefs.playerSite = 'pages'
+    state.prefs.playerHidden = isOnShow
+    saveState()
+    playerSay('site pages')
+    playerSay(isOnShow ? 'hide' : 'show')
+    placePlayer()
+
+    return { isShown: !isOnShow }
+  },
   // A library song's bytes, for the equalizer's player in the window. Only songs the library found.
   'music:bytes': async file => {
     if (typeof file !== 'string' || !knownSongs.has(file)) {
@@ -3070,7 +3670,7 @@ const handlers = {
   'docs:read': name => {
     const file =
       name === 'readme' ? path.join(ROOT, 'README.md')
-      : ['user-guide', 'skins', 'privacy', 'security', 'code-guide'].includes(name) ? path.join(ROOT, 'docs', `${name}.md`)
+      : ['quick-start', 'user-guide', 'skins', 'privacy', 'security', 'code-guide'].includes(name) ? path.join(ROOT, 'docs', `${name}.md`)
       : null
 
     try {
@@ -3115,26 +3715,52 @@ const handlers = {
 
     return true
   },
-  // Closes the app and opens it again, to pick up changed app code.
-  'app:restart': () => {
-    let isGone = false
-    const go = () => {
-      if (!isGone) {
-        isGone = true
-        playerHelper?.kill()
-        app.relaunch()
-        app.quit()
-      }
+  // Closes the app and opens it again, to pick up changed app code. Claude
+  // Code runs inside this app, so a restart stops work that is running:
+  // with work going on, the person picks between waiting for it to finish
+  // and restarting now with the work picked up again afterwards.
+  'app:restart': async () => {
+    const busy = busySessions()
+
+    if (busy.length === 0) {
+      restartNow()
+
+      return true
     }
 
-    // The player is let go first, so the music plays on; the new run takes it back.
-    if (playerHelper === null) {
-      go()
+    const names = busy.map(one => one.project.name).slice(0, 6).join(', ')
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'question',
+      title: 'Cla-Amp',
+      message: `Claude is still working in ${busy.length === 1 ? names : `${busy.length} projects (${names})`}.`,
+      detail:
+        'Claude Code runs inside Cla-Amp, so a restart stops work that is running.\n\n' +
+        'Restart when the work is done: nothing is stopped. Cla-Amp restarts by itself once every chat here has finished.\n\n' +
+        'Restart now and carry on: the work is stopped, Cla-Amp restarts, and each chat that was working is told to carry on from where it stopped. Waiting messages are kept. Agents running in the background are stopped; Claude starts them again if they are still needed.',
+      buttons: ['Restart when the work is done', 'Restart now and carry on', 'Not now'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    })
+
+    clearInterval(idleRestart)
+    idleRestart = null
+
+    if (response === 0) {
+      send('amp:update', { kind: 'waiting' })
+      idleRestart = setInterval(() => {
+        if (busySessions().length === 0) {
+          clearInterval(idleRestart)
+          restartNow()
+        }
+      }, 2000)
+    } else if (response === 1) {
+      state.carryOn = busySessions().map(one => ({ id: one.project.id, wasWorking: one.isBusy || one.agentCount > 0, queue: one.queue }))
+      saveState()
+      isCloseAgreed = true
+      restartNow()
     } else {
-      isRestarting = true
-      playerHelper.once('exit', go)
-      playerSay('release')
-      setTimeout(go, 2500)
+      send('amp:update', { kind: 'app' })
     }
 
     return true
@@ -3145,6 +3771,8 @@ const handlers = {
   'auth:login': async () => {
     return openClaudeConsole(['auth', 'login'], dataDir())
   },
+  // A waiting message is sent at once: the work in hand is cut short for it.
+  'queue:now': (id, index) => void sessionOf(id)?.sendNow(index),
   'queue:remove': (id, index) => {
     const session = sessionOf(id)
 
@@ -3152,6 +3780,26 @@ const handlers = {
       session.queue.splice(index, 1)
       session.setStatus(session.status)
     }
+  },
+  // The window's smallest width follows the columns on show, so the chat is
+  // never squeezed and no column is cut off. A window narrower than that is widened.
+  'win:least': asked => {
+    if (win === null || win.isDestroyed() || SHOT) {
+      return false
+    }
+
+    const own = win.getBounds()
+    const area = screen.getDisplayMatching(own).workArea
+    const least = Math.round(Math.max(940, Math.min(Number(asked) || 940, area.width)))
+    win.setMinimumSize(least, 600)
+
+    if (!win.isMaximized() && !win.isFullScreen() && !win.isMinimized() && own.width < least) {
+      win.setBounds({ x: Math.max(area.x, Math.min(own.x, area.x + area.width - least)), y: own.y, width: least, height: own.height })
+      makeRoom()
+      placePlayer()
+    }
+
+    return true
   },
   win: action => {
     if (action === 'minimize') {
@@ -3206,6 +3854,61 @@ const handlers = {
 
     return found.slice(0, 4).map(({ url, name }) => ({ url, name }))
   },
+  // A file named in a reply, for the window's file viewer: text (shown as
+  // it is, or drawn when it is Markdown) or a picture. Only on the person's
+  // click, only a regular file, and nothing is run or sent anywhere.
+  'file:view': (id, name) => {
+    const file = fileNamed(id, name)
+
+    if (file === null) {
+      return { error: 'That file was not found.' }
+    }
+
+    const end = path.extname(file).toLowerCase()
+    const said = { name: path.basename(file), file, size: fs.statSync(file).size, canBrowse: BROWSER_ENDS.includes(end) }
+
+    if (PICTURE_ENDS[end]) {
+      return { ...said, kind: 'picture', url: pathToFileURL(file).href }
+    }
+
+    if (said.size > 2000000) {
+      return { ...said, kind: 'other', note: 'This file is too large to show here.' }
+    }
+
+    const text = fs.readFileSync(file)
+
+    // A file with empty bytes in it is not text.
+    if (text.subarray(0, 8000).includes(0)) {
+      return { ...said, kind: 'other', note: 'This is not a text file, so it cannot be shown here.' }
+    }
+
+    return { ...said, kind: end === '.md' || end === '.markdown' ? 'markdown' : 'text', text: text.toString('utf8'), language: end.slice(1) }
+  },
+  // Shows the file in its folder, in Windows' own file window.
+  'file:reveal': (id, name) => {
+    const file = fileNamed(id, name)
+
+    if (file !== null) {
+      shell.showItemInFolder(file)
+    }
+
+    return file !== null
+  },
+  // A page or a PDF opens in the person's browser; the window itself never loads one.
+  'file:browser': async (id, name) => {
+    const file = fileNamed(id, name)
+
+    if (file === null || !BROWSER_ENDS.includes(path.extname(file).toLowerCase())) {
+      return false
+    }
+
+    // In Cla-Amp's browser when one is found for it; else the person's own browser.
+    if (!(await openPage(pathToFileURL(file).href))) {
+      void shell.openExternal(pathToFileURL(file).href)
+    }
+
+    return true
+  },
   'music:scan': () => scanSongs(),
   // Adds a folder of music, picked in a system dialog.
   'music:add': async () => {
@@ -3258,19 +3961,28 @@ const handlers = {
     }
 
     try {
-      tagCache ??= {}
-      const files = readPlaylist(file)
-        .map(one => describeSong(one, tagCache))
-        .filter(Boolean)
-
-      for (const song of files) {
-        knownSongs.add(song.path)
-      }
-
-      return { name: path.basename(file).replace(/\.[^.]+$/, ''), files }
+      // Read once here, so a file that is no playlist is turned down and not kept.
+      readPlaylist(file)
     } catch (error) {
       return { error: error instanceof Error ? error.message : 'That playlist could not be read.' }
     }
+
+    // It stays in the app, across restarts, until the person takes it out.
+    const kept = playlistFiles()
+
+    if (!kept.some(one => one.toLowerCase() === file.toLowerCase())) {
+      state.prefs.playlists = [...kept, file]
+      saveState()
+    }
+
+    return { ...scanSongs(), picked: playlistFiles().find(one => one.toLowerCase() === file.toLowerCase()) }
+  },
+  // Takes a playlist out of the app. Its file, and the songs, stay where they are.
+  'music:unlist': file => {
+    state.prefs.playlists = playlistFiles().filter(one => one !== file)
+    saveState()
+
+    return scanSongs()
   },
   // The music helper takes a fixed set of commands. A song is one this app
   // found in the music folder, never a path or an address the page made up.
@@ -3304,6 +4016,7 @@ const handlers = {
     const checks = {
       volume: one => typeof one === 'number' && one >= 0 && one <= 1,
       skin: one => typeof one === 'string' && one.length < 80,
+      useChrome: one => typeof one === 'boolean',
       pins: one => Array.isArray(one) && one.length < 2000 && one.every(id => typeof id === 'string' && id.length < 80),
     }
 
@@ -3331,8 +4044,88 @@ const openLink = raw => {
   }
 
   if ((url.protocol === 'https:' || url.protocol === 'http:') && url.username === '' && url.password === '') {
-    void shell.openExternal(url.href)
+    const toBrowser = () => void shell.openExternal(url.href)
+
+    // A claude.ai link goes to the attached claude.ai window, where the person
+    // is signed in; a page served from this computer, to Cla-Amp's browser;
+    // any other link, to the person's own browser.
+    if (isClaudeLink(url)) {
+      void openBrowserPlayer('', 'claude', false, url.href).then(opened => {
+        if (opened?.error) {
+          toBrowser()
+        }
+      })
+    } else if (isLocalLink(url)) {
+      void openPage(url.href).then(isOpen => {
+        if (!isOpen) {
+          toBrowser()
+        }
+      })
+    } else {
+      toBrowser()
+    }
   }
+}
+
+const isClaudeLink = url => url.protocol === 'https:' && (url.hostname === 'claude.ai' || url.hostname.endsWith('.claude.ai') || url.hostname === 'claude.site' || url.hostname.endsWith('.claude.site'))
+const isLocalLink = url => ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || url.hostname.endsWith('.localhost')
+
+/**
+ * Opens Cla-Amp's browser, on one address or (with none) on its own start
+ * page: a real browser window with tabs (Chrome when it is installed, else
+ * Edge or Brave) with a browser profile of its own, kept in this app's data
+ * folder and read and written by the browser only. It shares nothing with
+ * the person's everyday browser: no sign-in, history, cookie or add-on. The
+ * window is attached to this one like the players'. Nothing is added to the
+ * browser and nothing on its pages is read or changed. An address opens as
+ * a new tab when the browser is already open.
+ * Resolves false when there is no browser for it, or on another system.
+ */
+const openPage = async href => {
+  if (process.platform !== 'win32' || win === null || win.isDestroyed() || IS_DEMO) {
+    return false
+  }
+
+  let url = null
+
+  if (href !== null) {
+    try {
+      url = new URL(String(href))
+    } catch {
+      return false
+    }
+
+    if (!['https:', 'http:', 'file:'].includes(url.protocol) || url.username !== '' || url.password !== '') {
+      return false
+    }
+  }
+
+  const found = await findBrowsers()
+  const browser = found.find(one => one.name === 'Chrome') ?? found[0]
+
+  if (!browser) {
+    return false
+  }
+
+  // Every part of the command is fixed here or is one of this app's own folders,
+  // but for the address, which is one whole argument and has been read as an address.
+  const child = spawn(
+    browser.file,
+    [...ownFlags(pagesProfile()), ...(url === null ? ['--new-window'] : [url.href])],
+    { detached: true, stdio: 'ignore' },
+  )
+  child.on('error', () => {})
+  child.unref()
+  state.prefs.playerSite = 'pages'
+  state.prefs.playerHidden = false
+  saveState()
+  startPlayerHelper()
+  playerSay('site pages')
+  playerSay('show')
+  playerSay('find')
+  placePlayer()
+
+  return true
 }
 
 // ------------------------------------------------------- YouTube Music player
@@ -3393,9 +4186,24 @@ const findBrowsers = async () => {
 
 /**
  * Browsers whose player window gets a profile of its own and is docked to
- * this window. Any other browser opens the player as an ordinary window.
+ * this window. Chrome uses the one profile of Cla-Amp's own browser, so the
+ * Browser, the players and claude.ai are windows of one Chrome; Edge and
+ * Brave use the players' profile.
  */
-const DOCKS = ['Edge', 'Brave']
+const DOCKS = ['Chrome', 'Edge', 'Brave']
+const profileOf = browser => (browser.name === 'Chrome' ? pagesProfile() : playerProfile())
+// How a browser of Cla-Amp's own is started. Every part is fixed here or is one of this app's own folders.
+const ownFlags = dir => [
+  '--user-data-dir=' + dir,
+  // A player keeps running at full speed while hidden or covered.
+  '--disable-background-timer-throttling',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding',
+  '--no-first-run',
+  // Nothing of it lives on in the background once its windows are closed.
+  '--disable-background-mode',
+  '--no-default-browser-check',
+]
 // Liked Songs. Signed out, Spotify shows its own sign-in page first.
 const SPOTIFY_HOME = 'https://open.spotify.com/collection/tracks'
 const CLAUDE_HOME = 'https://claude.ai/'
@@ -3408,35 +4216,24 @@ const CLAUDE_HOME = 'https://claude.ai/'
  * real browser. Nothing is added to the browser and nothing on its pages is
  * read or changed: what is playing comes from Windows' own media controls.
  */
-const openBrowserPlayer = async (wanted, site = 'ytm', isQuiet = false) => {
+const openBrowserPlayer = async (wanted, site = 'ytm', isQuiet = false, address = null) => {
   const found = await findBrowsers()
-  // claude.ai goes to a browser that can be docked, when there is one.
-  const browser = (site === 'claude' ? found.find(one => DOCKS.includes(one.name)) : found.find(one => one.name === wanted)) ?? found[0]
+  // claude.ai goes to Chrome when it is installed, as Cla-Amp's own browser does.
+  const browser = (site === 'claude' ? (found.find(one => one.name === 'Chrome') ?? found.find(one => DOCKS.includes(one.name))) : found.find(one => one.name === wanted)) ?? found[0]
 
   if (!browser) {
     return { error: 'No Chrome, Edge or Brave was found.' }
   }
 
   const isAuto = DOCKS.includes(browser.name)
-  const home = site === 'claude' ? CLAUDE_HOME : site === 'spotify' ? SPOTIFY_HOME : PLAYER_HOME
+  // A claude.ai link from a chat opens on its own address; it has been read as an address by the caller.
+  const home = site === 'claude' ? (address ?? CLAUDE_HOME) : site === 'spotify' ? SPOTIFY_HOME : PLAYER_HOME
 
   // Every part of the command is fixed here or is one of this app's own folders.
   const child = spawn(
     browser.file,
     [
-      ...(isAuto
-        ? [
-            '--user-data-dir=' + playerProfile(),
-            // The player keeps running at full speed while hidden or covered.
-            '--disable-background-timer-throttling',
-            '--disable-backgrounding-occluded-windows',
-            '--disable-renderer-backgrounding',
-            '--no-first-run',
-            // Nothing of the player lives on in the background once its windows are closed.
-            '--disable-background-mode',
-            '--no-default-browser-check',
-          ]
-        : []),
+      ...(isAuto ? ownFlags(profileOf(browser)) : []),
       '--app=' + home,
     ],
     { detached: true, stdio: 'ignore' },
@@ -3459,6 +4256,13 @@ const openBrowserPlayer = async (wanted, site = 'ytm', isQuiet = false) => {
     playerSay('find')
     placePlayer()
     tellBrowserSite()
+
+    // One music player sounds at a time: opening one pauses whatever is
+    // playing. The other player's window is tucked away, not closed, so its
+    // song, its place in the song and its playlist are there to go back to.
+    if (!isQuiet && (site === 'ytm' || site === 'spotify') && (playerSites.includes('ytm') || playerSites.includes('spotify'))) {
+      deckCommand('hush')
+    }
   }
 
   return { browser: browser.name, isAuto }
@@ -3573,6 +4377,9 @@ const createWindow = () => {
   })
   win.webContents.on('will-navigate', event => event.preventDefault())
   void win.loadFile(path.join(ROOT, 'renderer', 'index.html'), IS_DEMO ? { query: { demo: '1' } } : {})
+
+  // Work that a restart stopped is picked up once the window can show it.
+  win.webContents.once('did-finish-load', () => setTimeout(carryOn, 1500))
 
   if (SHOT) {
     win.webContents.on('console-message', (_event, level, text) => {

@@ -1,6 +1,6 @@
 // The only bridge between the window and the main process: a fixed list of
 // calls the page may make, and two streams of events it may listen to.
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 const CALLS = new Set([
   'state:load',
@@ -10,10 +10,13 @@ const CALLS = new Set([
   'project:send',
   'project:stop',
   'project:new',
+  'project:another',
+  'project:describe',
   'project:mode',
   'project:permission',
   'project:branch',
   'queue:remove',
+  'queue:now',
   'session:info',
   'session:usage',
   'session:context',
@@ -72,10 +75,19 @@ const CALLS = new Set([
   'chats:fork',
   'text:copy',
   'win',
+  'win:least',
+  'work:load',
   'pick:video',
+  'file:view',
+  'file:reveal',
+  'file:browser',
+  'pages:toggle',
+  'attach:pick',
+  'attach:paste',
   'music:add',
   'music:remove',
   'music:playlist',
+  'music:unlist',
   'music:scan',
   'deck:cmd',
   'prefs:set',
@@ -96,5 +108,13 @@ contextBridge.exposeInMainWorld('amp', {
     }
 
     ipcRenderer.on(name, (_event, payload) => listener(payload))
+  },
+  // Where a file dropped on the window lives on this computer ('' for one with no file behind it).
+  pathOf: file => {
+    try {
+      return webUtils.getPathForFile(file)
+    } catch {
+      return ''
+    }
   },
 })

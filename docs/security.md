@@ -127,11 +127,13 @@ so this adds no new way in; it only shortens the wait.
 
 **Open player** starts your own browser (Chrome, Edge or Brave, found only in
 the folders their installers use) with one fixed address, YouTube Music or
-Spotify's web player, as a window without tabs. In Edge and Brave that
-window gets a browser profile of its own, kept in Cla-Amp's data folder, so
-it can be attached to the Cla-Amp window; you sign in there once, on the
-service's own page. In Chrome it is an ordinary window with the sign-in you
-already have.
+Spotify's web player, as a window without tabs. That window uses a browser
+profile of Cla-Amp's own, kept in Cla-Amp's data folder, so it can be
+attached to the Cla-Amp window; you sign in there once, on the service's
+own page. In Chrome it is the same profile as Cla-Amp's browser (the
+**Browser** button), so the Browser, the players and claude.ai are windows
+of one Chrome that shares nothing with your everyday Chrome. In Edge and
+Brave the players have a profile of their own.
 
 Cla-Amp adds nothing to the browser: no extension, no script, no stylesheet.
 It does not read or change the pages, and it does not read the browser's
@@ -163,7 +165,9 @@ set and the app runs from its source folder.
 
 - **What Claude is allowed to do.** In Ask mode Claude asks before each
   command or change; read the card before pressing Allow. Auto-edit lets it
-  change files without asking. A prompt hidden in a web page or file can try
+  change files without asking. In Auto, Claude Code's own checker allows
+  or refuses each step and a card appears only when it cannot decide; that
+  is less of a check than Ask, so use it in folders you trust. A prompt hidden in a web page or file can try
   to steer Claude; the permission card is the check on that.
 - **Which folders to trust**, and which full skins to use.
 - **Connectors and plugins.** They are Claude Code's own and run with its
@@ -177,13 +181,55 @@ set and the app runs from its source folder.
   to and the chat that started it. Only those session records are opened;
   the desktop app's sign-in and settings files are not.
 - Keeps its own state in `%APPDATA%\Cla-Amp`.
+- The **Let Claude use my Chrome** switch is off by default. Turned on, Cla-Amp
+  starts Claude Code with its own Chrome option, and Claude Code connects
+  to Anthropic's Claude in Chrome add-on, if you installed it. Claude can
+  then open, read and act on pages in your Chrome, where you are signed in
+  to your sites, so treat it like any other tool that can act for you:
+  each use goes through the same asking as a command or a file change,
+  and the add-on keeps its own site permissions. Cla-Amp installs nothing
+  in the browser, does not talk to the add-on itself, and sees no cookie,
+  password or page.
+- While the list of working chats is open, Cla-Amp asks Windows for its
+  process list (ids, memory and processor time) to show what each chat's
+  Claude Code is using. Only numbers are kept, only for Cla-Amp's own
+  chat processes and what they started; nothing is sent anywhere.
+- A file's name in a reply can be clicked to read that file in the
+  window. Cla-Amp reads it only on your click and shows it as text or as
+  a picture: a Markdown file is drawn through the same cleaning as a
+  reply, and nothing in any file is run. A web page or a PDF is never
+  loaded inside the window; **Open in browser** hands it to Cla-Amp's
+  browser.
+- Cla-Amp's browser (the **Browser** button) is a real browser window,
+  started the same way as the players': Chrome when it is installed (else
+  Edge or Brave), found only in its installer's folder, with a browser
+  profile of its own in `%APPDATA%\Cla-Amp\pages-profile`. That profile is used for
+  nothing else, so a page opened there cannot see your everyday browser's
+  sign-ins, cookies, history or add-ons, and the browser's own sandbox
+  applies to it as to any page. Cla-Amp itself sends only two kinds of
+  address there: a page or PDF file you opened from the viewer, and a
+  link to this computer (localhost); where you browse from there is up to
+  you. A claude.ai link in a reply opens in the attached claude.ai window
+  instead. Each address is checked and passed as one whole argument. Cla-Amp adds nothing to that browser and
+  reads nothing from its pages; if you sign in to claude.ai there, the
+  browser keeps that sign-in and Cla-Amp never sees it. The window closes
+  with Cla-Amp.
+- Files you attach to a message (dropped, pasted or picked) are given to
+  Claude Code: pictures as they are, other files by their path, which Claude
+  Code then reads under its usual rules. Only files you attached yourself
+  go; the page cannot name a file by itself, since a path is taken only
+  from a real drop, paste or the file picker. A pasted picture is saved in
+  `%APPDATA%\Cla-Amp\attachments` first.
 - To draw the spectrum, the music helper captures the sound the computer is
   playing, whatever program it comes from, a moment at a time and in memory
   only. Each moment is measured and discarded. It is never saved to disk and
   never sent anywhere.
 - Sends nothing anywhere by itself. One thing goes out, and only when you
   use it: with **Import from link**, the one skin file your pasted link
-  names is fetched from the Winamp Skin Museum's file store.
+  names is fetched from the Winamp Skin Museum's file store. Apart from
+  the program, **Update.bat** is a script the person runs by hand: it
+  downloads Cla-Amp's newest version from its GitHub page over HTTPS and
+  copies it over the folder. Cla-Amp never runs it.
 - Listens on no port, on this computer or the network.
 - Claude Code talks to Anthropic as it always does. The players and
   claude.ai are the services' own pages in your browser and talk to their

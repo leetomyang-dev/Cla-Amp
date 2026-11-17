@@ -14,8 +14,12 @@ to remove it all.
 | Cla-Amp's settings: your project folders, window layout, skins, themes, widgets | `%APPDATA%\Cla-Amp` | Plain files. |
 | Your Claude Code chats | `%USERPROFILE%\.claude\projects` | Claude Code's own files. Cla-Amp reads and continues them, as Claude Code does. |
 | The Claude desktop app's record of each chat (title, model, whether archived) | The desktop app's own folder | Read only, to show titles and grouping. Never changed. |
+| Pictures shown in a chat, and pictures you pasted into a message | `%APPDATA%\Cla-Amp\pictures` and `attachments` | Copies, so the chat can show them. Files you attach from disk are not copied; they go to Claude with your message, as in Claude Code. |
+| The profile of Cla-Amp's browser (its history, cookies and any sign-in you make there) | `%APPDATA%\Cla-Amp\pages-profile` | Written and read by the browser only. Delete the folder to clear it. |
+| Each day's token and cost totals (numbers only, from Claude Code's own count) | `%APPDATA%\Cla-Amp\claamp.json` | Stay on your computer. |
+| The calendar's due dates, notes and each day's report | `%APPDATA%\Cla-Amp` (the window's own storage) | Stay on your computer. A report goes to Claude only when you put it in a message yourself. |
 | Song titles and covers from your music folders | `%APPDATA%\Cla-Amp` | Read from the files you chose. |
-| The browser profile for the docked players and claude.ai (Edge, Brave) | `%APPDATA%\Cla-Amp\player-profile` | Written and read by the browser only. It holds the sign-ins you make in those windows. Cla-Amp never opens it. |
+| The browser profile for the docked players and claude.ai when they open in Edge or Brave (in Chrome they use the profile of Cla-Amp's browser, below) | `%APPDATA%\Cla-Amp\player-profile` | Written and read by the browser only. It holds the sign-ins you make in those windows. Cla-Amp never opens it. |
 
 The sound your computer plays is captured a moment at a time, in memory, to
 draw the spectrum. It is measured and discarded: never saved, never sent.
@@ -31,6 +35,7 @@ Cla-Amp sends nothing by itself. These go out, each only when you use it:
 | --- | --- | --- |
 | You chat | Your messages and the files Claude reads, exactly as in Claude Code | Anthropic, through Claude Code, under your own agreement with Anthropic |
 | You press Import from link | A request for the one skin file your link names | The Winamp Skin Museum's file store |
+| You run Update.bat | A request for Cla-Amp's newest version, and for the packages it needs | GitHub, and the npm package registry |
 | You click a link in a chat | Your browser opens that page | The page's owner |
 
 Each of those services sees your internet address, as any website does, and

@@ -1,24 +1,30 @@
-# Keeps the music player's browser window attached to the Cla-Amp window.
+# Keeps the music player's browser window, and Cla-Amp's browser, attached
+# to the Cla-Amp window.
 #
-# The player is a real browser window (Edge or Brave) with a profile of its
-# own. This helper only moves, shows, hides and closes that window; it reads
-# only the window's title (to tell the YouTube Music window from the Spotify
-# one), never what is in it, and it touches no other window: only top-level
-# browser windows of the one browser process that was started with the
-# player's profile folder.
+# Two browsers can be followed. Cla-Amp's own browser (Chrome when it is
+# installed) has a profile of its own: its ordinary window with tabs is the
+# Browser, and its windows without tabs are the players and claude.ai. A
+# player opened in Edge or Brave has a second profile of its own. This helper only moves, shows, hides and closes
+# those windows; it reads only a window's title (to tell the YouTube Music
+# window from the Spotify one), never what is in it, and it touches no other
+# window: only top-level browser windows of the two browser processes that
+# were started with those profile folders.
 #
 # In:  CA_PROFILE  the player's profile folder
+#      CA_PAGES    the profile folder of Cla-Amp's browser
 #      CA_OWNER    the Cla-Amp window's handle, as a number
 # Commands, one per line on standard input:
 #   find           the browser was just started: look for its window for a while
 #   place x y w h  where the player goes, in screen pixels
 #   hide | show    tuck the player away (the music keeps playing) or bring it back
-#   site ytm|spotify|claude  which window is wanted on show; the others stay tucked away
+#   site ytm|spotify|claude|pages  which window is wanted on show; the others stay tucked away
 #   close          close the player's windows
 #   release        let go of the player and stop, leaving it open (app restart)
 # When standard input ends (Cla-Amp is gone) the player is closed.
-# Out: lines of '@' + JSON: { count, hidden, shown, sites }; shown = windows on show now,
-# sites = which windows are open (ytm, spotify, claude).
+# Out: a line '#width N' when the person has dragged the window on show to a
+# new width (N in screen pixels), so Cla-Amp can make room for it; and
+# lines of '@' + JSON: { count, hidden, shown, sites }; shown = windows on show now,
+# sites = which windows are open (ytm, spotify, claude, pages).
 
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -55,7 +61,7 @@ public static class PlayerWin {
   static void Pixels() { try { SetThreadDpiAwarenessContext((IntPtr)(-4)); } catch { } }
 
   // The browser windows of one process: on show, or ones this helper hid.
-  public static List<long> Windows(uint processId, long[] known) {
+  public static List<long> Windows(uint processId, long[] known, bool tabsToo) {
     var found = new List<long>();
     var mine = new HashSet<long>(known);
     EnumWindows((window, extra) => {
@@ -73,7 +79,7 @@ public static class PlayerWin {
       var title = new StringBuilder(300);
       GetWindowText(window, title, 300);
       string shown = title.ToString();
-      if (shown.Contains(" - ") && (shown.EndsWith("Edge") || shown.EndsWith("Brave"))) { return true; }
+      if (!tabsToo && shown.Contains(" - ") && (shown.EndsWith("Edge") || shown.EndsWith("Brave") || shown.EndsWith("Chrome"))) { return true; }
       if (IsWindowVisible(window) || mine.Contains(window.ToInt64())) { found.Add(window.ToInt64()); }
       return true;
     }, IntPtr.Zero);
@@ -113,6 +119,23 @@ public static class PlayerWin {
     Rect r; GetWindowRect((IntPtr)window, out r);
     return text + " [" + (r.Right - r.Left) + "x" + (r.Bottom - r.Top) + " at " + r.Left + "," + r.Top + "]";
   }
+  // An ordinary browser window, with tabs: its title ends with the browser's name.
+  public static bool IsTabbed(long window) {
+    string shown = Name(window);
+    return shown.EndsWith("Google Chrome") || (shown.Contains(" - ") && (shown.EndsWith("Edge") || shown.EndsWith("Brave") || shown.EndsWith("Chrome")));
+  }
+  [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+  // True while the main mouse button is held: a window may be mid-drag.
+  public static bool MouseDown() { return (GetAsyncKeyState(1) & 0x8000) != 0; }
+  // The width of a window's visible frame, in screen pixels; 0 when it is minimised or maximised.
+  public static int FrameWidth(long window) {
+    Pixels();
+    var win = (IntPtr)window;
+    if (IsIconic(win) || IsZoomed(win) || !IsWindowVisible(win)) { return 0; }
+    Rect frame;
+    if (DwmGetWindowAttribute(win, 9, out frame, 16) != 0) { return 0; }
+    return frame.Right - frame.Left;
+  }
   public static string Name(long window) { var text = new StringBuilder(300); GetWindowText((IntPtr)window, text, 300); return text.ToString(); }
   public static void Show(long window, bool isShown) { ShowWindow((IntPtr)window, isShown ? 8 : 0); }
   public static void Close(long window) { PostMessage((IntPtr)window, 0x0010, IntPtr.Zero, IntPtr.Zero); }
@@ -120,21 +143,24 @@ public static class PlayerWin {
 '@
 
 $playerDir = [string]$env:CA_PROFILE
+$pagesDir = [string]$env:CA_PAGES
 $owner = [long]$env:CA_OWNER
 # One table holds the state, changed in place: this file is run as a block of
 # text, where a function cannot assign to the variables outside it.
 # browser: process id of the player's browser (0 when not known); windows: its
 # windows, as numbers; rect: x, y, w, h.
 # site: the player wanted on show; sites: which player each window is; shown: how things were last arranged.
-$s = @{ browser = 0; windows = @(); hidden = $false; rect = $null; lookUntil = [DateTime]::MinValue; said = ''; site = 'ytm'; sites = @{}; shown = '' }
+# pages: process id of Cla-Amp's browser; pageWins: its windows.
+# baseWidth: how wide the window on show was after it was last put in place (0: not looked at yet).
+$s = @{ baseWidth = 0; pages = 0; pageWins = @(); browser = 0; windows = @(); hidden = $false; rect = $null; lookUntil = [DateTime]::MinValue; said = ''; site = 'ytm'; sites = @{}; shown = '' }
 
-# The one browser process started with the player's profile folder.
-function Find-Browser {
-  if ($playerDir -eq '') { return 0 }
-  $all = Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='brave.exe'"
+# The one browser process started with a profile folder of this app's.
+function Find-Browser($dir) {
+  if ([string]$dir -eq '') { return 0 }
+  $all = Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='brave.exe' OR Name='chrome.exe'"
   foreach ($one in $all) {
     $line = [string]$one.CommandLine
-    if ($line.Contains($playerDir) -and -not $line.Contains('--type=')) { return [int]$one.ProcessId }
+    if ($line.Contains($dir) -and -not $line.Contains('--type=')) { return [int]$one.ProcessId }
   }
   return 0
 }
@@ -155,6 +181,8 @@ function Say {
 # name while Spotify plays) keeps what the window was before; a window never
 # told apart counts as the player that was wanted when it appeared.
 function Site-Of($one) {
+  # The window with tabs of Cla-Amp's browser is the Browser; its windows without tabs are told apart below.
+  if (($s.pageWins -contains $one) -and [PlayerWin]::IsTabbed($one)) { return 'pages' }
   $name = [PlayerWin]::Name($one)
   if ($name -like '*YouTube Music*') { $s.sites[$one] = 'ytm' }
   elseif ($name -like '*Spotify*') { $s.sites[$one] = 'spotify' }
@@ -168,6 +196,7 @@ function Arrange($isForced) {
   $plan = "$($s.hidden)|$($s.site)|" + (($s.windows | ForEach-Object { "$_=$(Site-Of $_)" }) -join ',')
   if (-not $isForced -and $plan -eq $s.shown) { return }
   $s.shown = $plan
+  $s.baseWidth = 0
   foreach ($one in $s.windows) {
     if ($s.hidden -or (Site-Of $one) -ne $s.site) { [PlayerWin]::Show($one, $false) }
     else {
@@ -180,18 +209,53 @@ function Arrange($isForced) {
 # Looks at the player's windows: takes in new ones, forgets closed ones.
 function Look {
   if ($s.browser -ne 0 -and $null -eq (Get-Process -Id $s.browser)) { $s.browser = 0 }
-  if ($s.browser -eq 0 -and [DateTime]::Now -lt $s.lookUntil) { $s.browser = Find-Browser }
+  if ($s.browser -eq 0 -and [DateTime]::Now -lt $s.lookUntil) { $s.browser = Find-Browser $playerDir }
+  if ($s.pages -ne 0 -and $null -eq (Get-Process -Id $s.pages)) { $s.pages = 0 }
+  if ($s.pages -eq 0 -and [DateTime]::Now -lt $s.lookUntil) { $s.pages = Find-Browser $pagesDir }
   $now = @()
-  if ($s.browser -ne 0) { $now = @([PlayerWin]::Windows([uint32]$s.browser, [long[]]$s.windows)) }
+  if ($s.browser -ne 0) { $now = @([PlayerWin]::Windows([uint32]$s.browser, [long[]]$s.windows, $false)) }
+  # Cla-Amp's browser is an ordinary window with tabs: those count too.
+  $pagesNow = @()
+  if ($s.pages -ne 0) { $pagesNow = @([PlayerWin]::Windows([uint32]$s.pages, [long[]]$s.windows, $true)) }
+  $s.pageWins = $pagesNow
+  $now = @($now) + @($pagesNow)
+  # One claude.ai window at a time: a link opened from a chat takes the place
+  # of the claude.ai window that was there. Two in one spot lie over each other.
+  # Only windows whose title says Claude: a player whose title is a song's name is never taken for one.
+  $claudeAll = @($now | Where-Object { -not [PlayerWin]::IsTabbed($_) -and [PlayerWin]::Name($_) -like '*Claude*' })
+  $claudeNew = @($claudeAll | Where-Object { $s.windows -notcontains $_ })
+  if ($claudeNew.Count -gt 0 -and $claudeAll.Count -gt 1) {
+    $keep = $claudeNew[$claudeNew.Count - 1]
+    foreach ($old in @($claudeAll | Where-Object { $_ -ne $keep })) { [PlayerWin]::Close($old) }
+  }
   foreach ($one in $now) {
     if ($s.windows -notcontains $one) {
       if ($owner -ne 0) { [void][PlayerWin]::Attach($one, $owner) }
     }
   }
   if ($env:CA_DEBUG -and $now.Count -ne $s.windows.Count) { foreach ($one in $now) { [Console]::Error.WriteLine('window: ' + [PlayerWin]::Title($one)) } }
+  if ($env:CA_DEBUG) { [Console]::Error.WriteLine('look: browser=' + $s.browser + ' pages=' + $s.pages + ' now=' + ($now -join ',') + ' known=' + ($s.windows -join ',')) }
   $s.windows = $now
   foreach ($gone in @($s.sites.Keys | Where-Object { $now -notcontains $_ })) { $s.sites.Remove($gone) }
   Arrange $false
+  # The person dragged the window on show wider or narrower: say so, once the mouse is let go.
+  if ($s.rect -and -not $s.hidden -and -not [PlayerWin]::MouseDown()) {
+    foreach ($one in $s.windows) {
+      if ((Site-Of $one) -ne $s.site) { continue }
+      $wide = [PlayerWin]::FrameWidth($one)
+      if ($wide -le 0) { break }
+      # The width right after placing is what later widths are held against: a
+      # browser that will not go as narrow as asked is not a drag.
+      if ($s.baseWidth -eq 0) { $s.baseWidth = $wide; break }
+      if ([Math]::Abs($wide - $s.baseWidth) -gt 6) {
+        $s.baseWidth = $wide
+        if ($env:CA_DEBUG) { [Console]::Error.WriteLine('dragged: ' + $wide + ' placed ' + $s.rect[2]) }
+        [Console]::Out.WriteLine('#width ' + $wide)
+        [Console]::Out.Flush()
+      }
+      break
+    }
+  }
   Say
 }
 
@@ -200,14 +264,18 @@ function Look {
 # browser process that was started with the player's own profile folder.
 function Shut {
   foreach ($one in $s.windows) { [PlayerWin]::Close($one) }
-  if ($s.browser -eq 0) { $s.browser = Find-Browser }
-  if ($s.browser -eq 0) { return }
-  for ($i = 0; $i -lt 16; $i++) {
-    if ($null -eq (Get-Process -Id $s.browser)) { $s.browser = 0; return }
-    Start-Sleep -Milliseconds 250
+  if ($s.browser -eq 0) { $s.browser = Find-Browser $playerDir }
+  if ($s.pages -eq 0) { $s.pages = Find-Browser $pagesDir }
+  foreach ($key in @('browser', 'pages')) {
+    if ($s[$key] -eq 0) { continue }
+    $isGone = $false
+    for ($i = 0; $i -lt 16; $i++) {
+      if ($null -eq (Get-Process -Id $s[$key])) { $isGone = $true; break }
+      Start-Sleep -Milliseconds 250
+    }
+    if (-not $isGone) { Stop-Process -Id $s[$key] -Force }
+    $s[$key] = 0
   }
-  Stop-Process -Id $s.browser -Force
-  $s.browser = 0
 }
 
 function Let-Go {
@@ -237,12 +305,13 @@ while ($true) {
       'place' {
         if ($parts.Count -eq 5) {
           $s.rect = @([int]$parts[1], [int]$parts[2], [int]$parts[3], [int]$parts[4])
+          if ($env:CA_DEBUG) { [Console]::Error.WriteLine('place: ' + ($s.rect -join ' ')) }
           Arrange $true
         }
         continue
       }
       'hide' { $s.hidden = $true; Arrange $true }
-      'site' { if ($parts.Count -eq 2 -and (@('ytm', 'spotify', 'claude') -contains $parts[1])) { $s.site = $parts[1]; Arrange $true } }
+      'site' { if ($parts.Count -eq 2 -and (@('ytm', 'spotify', 'claude', 'pages') -contains $parts[1])) { $s.site = $parts[1]; Arrange $true } }
       'show' {
         $s.hidden = $false
         Arrange $true

@@ -49,12 +49,80 @@ const load = () => {
 const settings = load()
 const save = () => localStorage.setItem('equalizer', JSON.stringify(settings))
 
-const audio = new Audio()
-audio.preload = 'auto'
+// Two players take turns, so one song can follow another without a gap, as
+// on a CD: while one plays, the other holds the next song, loaded and still,
+// and starts as the first one reaches its end.
+const makePlayer = () => {
+  const one = new Audio()
+  one.preload = 'auto'
+
+  return one
+}
+let audio = makePlayer()
+let spare = makePlayer()
+/** The address each player's song was given, to be let go of after. */
+const addresses = new Map()
+/** What the spare holds: the song, and whether it can be played. */
+let ahead = { song: '', isGood: false }
+let fetching = ''
+let swapTimer = null
+/** How long before the end the next song is started, to cover the moment a player takes to sound. */
+const LEAD_MS = 30
 let context = null
 let preamp = null
 let filters = []
-let address = ''
+
+const give = (player, bytes, kind) => {
+  URL.revokeObjectURL(addresses.get(player) ?? '')
+  addresses.set(player, URL.createObjectURL(new Blob([bytes], { type: kind })))
+  player.src = addresses.get(player)
+}
+
+const empty = player => {
+  player.pause()
+  player.removeAttribute('src')
+  player.load()
+  URL.revokeObjectURL(addresses.get(player) ?? '')
+  addresses.delete(player)
+}
+
+const dropAhead = () => {
+  clearTimeout(swapTimer)
+  swapTimer = null
+  fetching = ''
+
+  if (ahead.song !== '') {
+    empty(spare)
+  }
+  ahead = { song: '', isGood: false }
+}
+
+/** The song held ready takes over. False when there is none, or the song is no longer at its end. */
+const swap = () => {
+  clearTimeout(swapTimer)
+  swapTimer = null
+  const left = audio.duration - audio.currentTime
+
+  if (!ahead.isGood || tuner.state !== 'playing' || !(left < 0.3)) {
+    return false
+  }
+
+  const old = audio
+  audio = spare
+  spare = old
+  void audio.play().catch(() => {})
+  tuner.song = ahead.song
+  ahead = { song: '', isGood: false }
+  // The old player sounds its last moment, then lets go of its song.
+  setTimeout(() => {
+    if (spare === old && ahead.song === '') {
+      empty(old)
+    }
+  }, 600)
+  tuner.onSwap?.(tuner.song)
+
+  return true
+}
 
 /** Built on the first song: the sound path song, preamp, ten bands, speakers. */
 const wire = () => {
@@ -63,8 +131,11 @@ const wire = () => {
   }
 
   context = new AudioContext()
-  const source = context.createMediaElementSource(audio)
   preamp = context.createGain()
+
+  for (const player of [audio, spare]) {
+    context.createMediaElementSource(player).connect(preamp)
+  }
   filters = BANDS.map((frequency, index) => {
     const filter = context.createBiquadFilter()
     filter.type = index === 0 ? 'lowshelf' : index === BANDS.length - 1 ? 'highshelf' : 'peaking'
@@ -73,7 +144,7 @@ const wire = () => {
 
     return filter
   })
-  ;[source, preamp, ...filters, context.destination].reduce((from, to) => (from.connect(to), to))
+  ;[preamp, ...filters, context.destination].reduce((from, to) => (from.connect(to), to))
   tune()
 }
 
@@ -94,6 +165,8 @@ export const tuner = {
   state: 'stopped',
   isEnded: false,
   song: '',
+  /** Called with the song's file when the song held ready has taken over by itself. */
+  onSwap: null,
   get pos() {
     return Number.isFinite(audio.currentTime) ? audio.currentTime : 0
   },
@@ -118,6 +191,7 @@ export const tuner = {
 
     if (command === 'vol') {
       audio.volume = Math.max(0, Math.min(1, Number(argument) || 0))
+      spare.volume = audio.volume
 
       return false
     }
@@ -150,11 +224,8 @@ export const tuner = {
     return true
   },
   unload() {
-    audio.pause()
-    audio.removeAttribute('src')
-    audio.load()
-    URL.revokeObjectURL(address)
-    address = ''
+    dropAhead()
+    empty(audio)
     this.state = 'stopped'
     this.isOn = false
   },
@@ -172,8 +243,8 @@ export const tuner = {
 
     wire()
     void context.resume()
-    URL.revokeObjectURL(address)
-    address = URL.createObjectURL(new Blob([bytes], { type: kind }))
+    dropAhead()
+    give(audio, bytes, kind)
     this.song = file
     this.isOn = true
     this.isEnded = false
@@ -182,26 +253,74 @@ export const tuner = {
     // The helper's own player is stopped, and other apps' music paused, as it would do itself.
     void call('deck:cmd', 'stop')
     void call('deck:cmd', 'hush')
-    audio.src = address
     void audio.play().catch(() => {})
 
     return true
   },
+  /**
+   * Gets the song that comes next loaded and still, so that it starts with no
+   * gap when this one ends. Asked again with another song, that one replaces it.
+   */
+  async ready(file) {
+    if (!this.isOn || file === ahead.song || file === fetching) {
+      return
+    }
+
+    fetching = file
+    const kind = KINDS[file.split('.').pop().toLowerCase()]
+    const bytes = kind ? await call('music:bytes', file) : null
+
+    if (fetching !== file || !this.isOn) {
+      return
+    }
+
+    dropAhead()
+    // A song this window cannot play is remembered too, so it is not asked for again; it starts the usual way.
+    ahead = { song: file, isGood: !!bytes }
+
+    if (bytes) {
+      wire()
+      spare.volume = audio.volume
+      give(spare, bytes, kind)
+    }
+  },
 }
 
-audio.addEventListener('ended', () => {
-  tuner.state = 'stopped'
-  tuner.isEnded = true
-})
-audio.addEventListener('error', () => {
-  // The window could not read the song after all: hand it to the helper.
-  if (tuner.isOn && tuner.song !== '') {
-    const song = tuner.song
-    tuner.unload()
-    setNote('This song plays without the equalizer.')
-    void call('deck:cmd', 'open', song)
-  }
-})
+for (const player of [audio, spare]) {
+  player.addEventListener('timeupdate', () => {
+    const left = player.duration - player.currentTime
+
+    // Close to the end with the next song ready: it is started on the moment, a breath early.
+    if (player === audio && ahead.isGood && swapTimer === null && tuner.state === 'playing' && left < 0.8) {
+      swapTimer = setTimeout(swap, Math.max(0, left * 1000 - LEAD_MS))
+    }
+  })
+  player.addEventListener('ended', () => {
+    // The player that just handed over, or a timer that came late: the next song starts now.
+    if (player !== audio || swap()) {
+      return
+    }
+
+    tuner.state = 'stopped'
+    tuner.isEnded = true
+  })
+  player.addEventListener('error', () => {
+    if (player !== audio) {
+      // The song held ready cannot be played here: it starts the usual way when its turn comes.
+      ahead = { ...ahead, isGood: false }
+
+      return
+    }
+
+    // The window could not read the song after all: hand it to the helper.
+    if (tuner.isOn && tuner.song !== '') {
+      const song = tuner.song
+      tuner.unload()
+      setNote('This song plays without the equalizer.')
+      void call('deck:cmd', 'open', song)
+    }
+  })
+}
 
 // ------------------------------------------------------------------ the panel
 

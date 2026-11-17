@@ -1,5 +1,6 @@
 // The music deck's library: finds audio files in the person's music folders,
-// reads each song's title, artist, album and genre, and reads playlist files.
+// reads each song's title, artist, album, genre, number and length, and reads
+// playlist files.
 //
 // Song files and playlists can come from anywhere, so they are read with care:
 // only a capped slice of each file is looked at, every length is checked
@@ -69,8 +70,8 @@ const readId3 = (bytes, tags) => {
   const end = Math.min(bytes.length, 10 + (((bytes[6] & 127) << 21) | ((bytes[7] & 127) << 14) | ((bytes[8] & 127) << 7) | (bytes[9] & 127)))
   const names =
     version === 2
-      ? { TT2: 'title', TP1: 'artist', TAL: 'album', TCO: 'genre' }
-      : { TIT2: 'title', TPE1: 'artist', TALB: 'album', TCON: 'genre' }
+      ? { TT2: 'title', TP1: 'artist', TAL: 'album', TCO: 'genre', TRK: 'track' }
+      : { TIT2: 'title', TPE1: 'artist', TALB: 'album', TCON: 'genre', TRCK: 'track' }
   const idLength = version === 2 ? 3 : 4
   const headLength = version === 2 ? 6 : 10
   let at = 10
@@ -125,7 +126,7 @@ const readFlac = (bytes, tags) => {
         }
 
         const [, key, value] = /^([A-Za-z]+)=([\s\S]*)$/.exec(bytes.toString('utf8', here, here + Math.min(length, 2000))) ?? []
-        const name = { title: 'title', artist: 'artist', album: 'album', genre: 'genre' }[key?.toLowerCase()]
+        const name = { title: 'title', artist: 'artist', album: 'album', genre: 'genre', tracknumber: 'track' }[key?.toLowerCase()]
 
         if (name && !tags[name]) {
           tags[name] = tidy(value)
@@ -143,9 +144,165 @@ const readFlac = (bytes, tags) => {
   }
 }
 
-/** A song's details: from its tag where it has one, else from its file name ("Artist - Title"). */
+// ---- how long a song runs, from the file's own headers. A few small reads
+// at known places; every number is checked before it is used.
+const MP3_RATES = [44100, 48000, 32000]
+const MP3_KBPS = {
+  one: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+  two: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+}
+
+/** MP3: the count of frames its first frame states (Xing, Info or VBRI), else its size over its bit rate. */
+const mp3Length = (read, size, start) => {
+  const bytes = read(start, 8192)
+
+  for (let at = 0; at + 4 <= bytes.length; at += 1) {
+    if (bytes[at] !== 0xff || (bytes[at + 1] & 0xe0) !== 0xe0) {
+      continue
+    }
+
+    const version = (bytes[at + 1] >> 3) & 3
+    const layer = (bytes[at + 1] >> 1) & 3
+    const kbps = (version === 3 ? MP3_KBPS.one : MP3_KBPS.two)[bytes[at + 2] >> 4]
+    const rate = MP3_RATES[(bytes[at + 2] >> 2) & 3] / (version === 3 ? 1 : version === 2 ? 2 : 4)
+
+    // Layer 3 only, with a bit rate and a sample rate that exist: anything else is not a frame's start.
+    if (version === 1 || layer !== 1 || !kbps || !rate) {
+      continue
+    }
+
+    const perFrame = version === 3 ? 1152 : 576
+    const isMono = bytes[at + 3] >> 6 === 3
+    const note = at + 4 + (version === 3 ? (isMono ? 17 : 32) : isMono ? 9 : 17)
+    const word = bytes.toString('latin1', note, note + 4)
+
+    if ((word === 'Xing' || word === 'Info') && note + 12 <= bytes.length && (bytes[note + 7] & 1) === 1) {
+      return (bytes.readUInt32BE(note + 8) * perFrame) / rate
+    }
+
+    if (bytes.toString('latin1', at + 36, at + 40) === 'VBRI' && at + 54 <= bytes.length) {
+      return (bytes.readUInt32BE(at + 50) * perFrame) / rate
+    }
+
+    return ((size - start - at) * 8) / (kbps * 1000)
+  }
+
+  return 0
+}
+
+/** WAV: the size of its sound over its bytes a second. */
+const wavLength = (read, size) => {
+  let at = 12
+  let perSecond = 0
+
+  for (let step = 0; step < 40 && at + 8 <= size; step += 1) {
+    const head = read(at, 8)
+
+    if (head.length < 8) {
+      break
+    }
+
+    const id = head.toString('latin1', 0, 4)
+    const length = head.readUInt32LE(4)
+
+    if (id === 'fmt ') {
+      const body = read(at + 8, 16)
+      perSecond = body.length >= 12 ? body.readUInt32LE(8) : 0
+    } else if (id === 'data') {
+      return perSecond > 0 ? Math.min(length, size - at - 8) / perSecond : 0
+    }
+    at += 8 + length + (length % 2)
+  }
+
+  return 0
+}
+
+/** M4A: the length its "mvhd" box states, found by stepping from box to box. */
+const m4aLength = (read, size) => {
+  const find = (from, to, wanted) => {
+    let at = from
+
+    for (let step = 0; step < 200 && at + 8 <= to; step += 1) {
+      const head = read(at, 16)
+
+      if (head.length < 8) {
+        break
+      }
+
+      const short = head.readUInt32BE(0)
+      const isLong = short === 1 && head.length >= 16
+      const length = isLong ? Number(head.readBigUInt64BE(8)) : short === 0 ? to - at : short
+
+      if (length < 8 || at + length > to) {
+        break
+      }
+
+      if (head.toString('latin1', 4, 8) === wanted) {
+        return { start: at + (isLong ? 16 : 8), end: at + length }
+      }
+      at += length
+    }
+
+    return null
+  }
+  const film = find(0, size, 'moov')
+  const stated = film && find(film.start, film.end, 'mvhd')
+
+  if (!stated) {
+    return 0
+  }
+
+  const body = read(stated.start, 32)
+
+  if (body.length < 32) {
+    return 0
+  }
+
+  const [scale, length] = body[0] === 1 ? [body.readUInt32BE(20), Number(body.readBigUInt64BE(24))] : [body.readUInt32BE(12), body.readUInt32BE(16)]
+
+  return scale > 0 ? length / scale : 0
+}
+
+/** A song's length in whole seconds; 0 when the file does not say, or is a kind not read here. */
+const readLength = (handle, size) => {
+  const read = (at, length) => {
+    const bytes = Buffer.alloc(length)
+
+    return bytes.subarray(0, fs.readSync(handle, bytes, 0, length, at))
+  }
+  const head = read(0, 64)
+  let seconds = 0
+
+  if (head.length < 12) {
+    return 0
+  }
+
+  if (head.toString('latin1', 0, 4) === 'fLaC') {
+    // The first block says the sample rate (20 bits) and the count of samples (36 bits).
+    if (head.length >= 26 && (head[4] & 127) === 0) {
+      const rate = (head[18] << 12) | (head[19] << 4) | (head[20] >> 4)
+      seconds = rate > 0 ? ((head[21] & 15) * 2 ** 32 + head.readUInt32BE(22)) / rate : 0
+    }
+  } else if (head.toString('latin1', 0, 4) === 'RIFF' && head.toString('latin1', 8, 12) === 'WAVE') {
+    seconds = wavLength(read, size)
+  } else if (head.toString('latin1', 4, 8) === 'ftyp') {
+    seconds = m4aLength(read, size)
+  } else {
+    const isId3 = head.toString('latin1', 0, 3) === 'ID3'
+    seconds = mp3Length(read, size, isId3 ? 10 + (((head[6] & 127) << 21) | ((head[7] & 127) << 14) | ((head[8] & 127) << 7) | (head[9] & 127)) : 0)
+  }
+
+  return Number.isFinite(seconds) && seconds > 0 && seconds < 86400 ? Math.round(seconds) : 0
+}
+
+/**
+ * A song's details: from its tag where it has one, else from its file name
+ * ("Artist - Title", with its number in front when it has one). `track` is
+ * its number on the album and `length` its seconds; 0 when not known.
+ */
 export const readTags = file => {
-  const tags = { title: '', artist: '', album: '', genre: '' }
+  const tags = { title: '', artist: '', album: '', genre: '', track: '' }
+  let length = 0
 
   try {
     const handle = fs.openSync(file, 'r')
@@ -161,6 +318,12 @@ export const readTags = file => {
         const got = fs.readSync(handle, bytes, 0, MAX_TAG, 0)
         ;(isId3 ? readId3 : readFlac)(bytes.subarray(0, got), tags)
       }
+
+      try {
+        length = readLength(handle, fs.fstatSync(handle).size)
+      } catch {
+        // A file cut short: its length stays unknown.
+      }
     } finally {
       fs.closeSync(handle)
     }
@@ -170,12 +333,17 @@ export const readTags = file => {
 
   const name = path.basename(file).replace(/\.[^.]+$/, '')
   const [, artist, title] = /^(?:\d{1,3}[ ._-]+)?(.+?) - (.+)$/.exec(name) ?? []
+  // The number: the tag's ("3" or "3/12"), else the one the file's name starts with ("03 - ...", "03. ...", "03 ...").
+  const numbered = /^(\d{1,3})\s*[._-]/.exec(name)?.[1] ?? /^(\d{2}) /.exec(name)?.[1]
+  const track = Number.parseInt(tags.track, 10) || Number.parseInt(numbered ?? '', 10) || 0
 
   return {
     title: tags.title || tidy(title ?? name),
     artist: tags.artist || tidy(artist ?? ''),
     album: tags.album,
     genre: tidy(genreName(tags.genre)),
+    track: track > 0 && track < 1000 ? track : 0,
+    length,
   }
 }
 
@@ -214,18 +382,19 @@ export const describeSong = (file, cache = {}, root = path.dirname(file)) => {
     return null
   }
 
-  if (cache[file]?.mark !== mark) {
-    cache[file] = { mark, ...readTags(file) }
+  // `v` is the form of what is kept: details kept by an older version are read again.
+  if (cache[file]?.mark !== mark || cache[file].v !== 2) {
+    cache[file] = { mark, v: 2, ...readTags(file) }
   }
 
-  const { title, artist, album, genre } = cache[file]
+  const { title, artist, album, genre, track, length } = cache[file]
 
   // The collection a song sits in: the folder above its own (an album's
   // artist, a pack's category), which sorts songs that carry no tags.
   const steps = path.relative(root, path.dirname(file)).split(path.sep).filter(Boolean)
   const group = steps.length >= 2 ? steps[steps.length - 2] : (steps[0] ?? path.basename(root))
 
-  return { path: file, name: artist ? `${artist} - ${title}` : title, title, artist, album, genre, folder: path.basename(path.dirname(file)), group }
+  return { path: file, name: artist ? `${artist} - ${title}` : title, title, artist, album, genre, track, length, folder: path.basename(path.dirname(file)), group }
 }
 
 /** Every song in the given folders, each once, with its details. */

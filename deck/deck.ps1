@@ -300,11 +300,17 @@ function Pick-Session {
   if ($null -eq $manager) { return $null }
   $current = $manager.GetCurrentSession()
   if ($wantApp -eq '') { return $current }
-  $isSpotify = { param($one) $name = [string]$one.SourceAppUserModelId; ($name -match 'spoti') -or ($browserSite -eq 'spotify' -and $name -match '^(msedge|brave|chrome)(.exe)?$') }
-  $wantSpotify = $wantApp -eq 'spotify'
-  if ($null -ne $current -and ((& $isSpotify $current) -eq $wantSpotify)) { return $current }
+  # Only the player's own sound counts. Anything else that plays on the
+  # computer (a video in another browser, a game) belongs to neither tab.
+  $plain = '^(msedge|brave|chrome)(\.exe)?$'
+  $isMine = if ($wantApp -eq 'spotify') {
+    { param($one) $name = [string]$one.SourceAppUserModelId; ($name -match 'spoti') -or ($browserSite -eq 'spotify' -and $name -match $plain) }
+  } else {
+    { param($one) $name = [string]$one.SourceAppUserModelId; ($name -match 'youtube|music\.you') -or ($browserSite -eq 'ytm' -and $name -match $plain) }
+  }
+  if ($null -ne $current -and (& $isMine $current)) { return $current }
   foreach ($one in $manager.GetSessions()) {
-    if ((& $isSpotify $one) -eq $wantSpotify) { return $one }
+    if (& $isMine $one) { return $one }
   }
   return $null
 }
@@ -425,7 +431,8 @@ function Player-Pids {
   $dir = [string]$env:CA_PROFILE
   if ($dir -ne '') {
     foreach ($one in (Get-CimInstance Win32_Process -Filter "Name='msedge.exe' OR Name='brave.exe' OR Name='chrome.exe'")) {
-      if (([string]$one.CommandLine).Contains($dir)) { $found += [int]$one.ProcessId }
+      $line = [string]$one.CommandLine
+      if ($line.Contains($dir) -or ([string]$env:CA_PAGES -ne '' -and $line.Contains([string]$env:CA_PAGES))) { $found += [int]$one.ProcessId }
     }
   }
   if ($wantApp -eq 'spotify' -or $viewApp -eq 'spotify') { foreach ($one in @(Get-Process -Name Spotify)) { $found += [int]$one.Id } }

@@ -6,6 +6,7 @@ import DOMPurify from '../node_modules/dompurify/dist/purify.es.mjs'
 import { marked } from '../node_modules/marked/lib/marked.esm.js'
 
 import { openAbout } from './about.js'
+import { dayKey, drawCalendar, notePeak, noteToday } from './calendar.js'
 import { buildEqualizer, tuner } from './equalizer.js'
 import { openGuides } from './guides.js'
 import { openLook, startLook } from './look.js'
@@ -41,6 +42,7 @@ const baseName = file => String(file).split(/[\\/]/).pop()
 const MODES = [
   { id: 'default', label: 'Ask', hint: 'Claude asks before it edits files or runs commands' },
   { id: 'acceptEdits', label: 'Auto-edit', hint: 'Claude edits files without asking; still asks for commands' },
+  { id: 'auto', label: 'Auto', hint: 'Claude works on by itself: Claude Code checks each step and asks you only for the risky ones' },
   { id: 'plan', label: 'Plan', hint: 'Claude only reads and plans; it changes nothing' },
 ]
 const BADGES = { working: 'WORKING', waiting: 'WAITING', complete: 'COMPLETE', attention: 'ATTENTION' }
@@ -74,8 +76,72 @@ const addProject = info => {
   return project
 }
 
+/**
+ * What is written and attached but not sent yet, kept for each chat: the
+ * message box follows the chat in view, and a half-written message waits
+ * where it was written, also across a reload or a restart. A chat that has
+ * not been saved yet (a new one) is known by its project entry.
+ */
+const drafts = new Map()
+const draftKeyOf = project => (project ? (project.chatId ? `chat:${project.chatId}` : `new:${project.id}`) : null)
+// The chat that what is in the message box right now belongs to.
+let boxKey = null
+
+/** A new chat got its id (its first message was sent): what is being written moves with it. */
+const nameChat = (project, chatId) => {
+  const before = draftKeyOf(project)
+  project.chatId = chatId
+  const now = draftKeyOf(project)
+
+  if (before !== now) {
+    if (drafts.has(before)) {
+      drafts.set(now, drafts.get(before))
+      drafts.delete(before)
+    }
+
+    if (boxKey === before) {
+      boxKey = now
+    }
+  }
+}
+
+try {
+  for (const [id, draft] of Object.entries(JSON.parse(localStorage.getItem('drafts') ?? '{}'))) {
+    drafts.set(id, draft)
+  }
+} catch {
+  // Unreadable drafts are dropped.
+}
+
+const keepDraft = () => {
+  const input = document.getElementById('input')
+
+  if (!boxKey || !input) {
+    return
+  }
+
+  if (input.value === '' && attached.length === 0) {
+    drafts.delete(boxKey)
+  } else {
+    drafts.set(boxKey, { text: input.value, files: [...attached] })
+  }
+  localStorage.setItem('drafts', JSON.stringify(Object.fromEntries(drafts)))
+}
+
+const takeDraft = () => {
+  const input = $('input')
+  boxKey = draftKeyOf(active())
+  const draft = drafts.get(boxKey)
+  input.value = typeof draft?.text === 'string' ? draft.text : ''
+  attached = Array.isArray(draft?.files) ? draft.files.filter(one => typeof one === 'string') : []
+  renderAttached()
+  input.dispatchEvent(new Event('input'))
+}
+
 const select = async id => {
+  keepDraft()
   activeId = id
+  takeDraft()
   localStorage.setItem('active', id ?? '')
   const project = active()
 
@@ -200,7 +266,7 @@ const apply = (project, event, isReplay = false) => {
       project.suggestion = ''
       project.lastPrompt = event.text
       project.startedAt = event.ts
-      project.items.push({ kind: 'user', ts: event.ts, text: event.text })
+      project.items.push({ kind: 'user', ts: event.ts, text: event.text, pictures: Array.isArray(event.pictures) ? event.pictures : [] })
       break
     case 'delta': {
       const item = assistantItem(project, event.ts)
@@ -380,6 +446,10 @@ const apply = (project, event, isReplay = false) => {
     case 'init':
       project.model = event.model
       project.hasSession = true
+
+      if (event.sessionId && !project.chatId) {
+        nameChat(project, event.sessionId)
+      }
       break
     default:
       break
@@ -399,6 +469,291 @@ const CLEAN = {
   ALLOW_DATA_ATTR: false,
 }
 
+// A link in a reply that is not a web address names a file. It is kept as a
+// mark the cleaning lets through, and becomes a button for the file viewer.
+marked.use({
+  walkTokens(token) {
+    if (token.type === 'link' && typeof token.href === 'string' && !/^(?:https?:|mailto:|#)/i.test(token.href)) {
+      token.href = `#file:${encodeURIComponent(token.href)}`
+    }
+  },
+})
+// Words in code type that read as a file's name, with an ending the viewer can show or point to.
+const FILE_NAME = /^[\w.\-\\/:~ ()@+]{1,260}\.(?:md|markdown|txt|log|csv|json|jsonl|js|mjs|cjs|ts|tsx|jsx|css|html|htm|py|gd|tscn|tres|cs|java|go|rs|rb|php|c|h|cpp|ps1|bat|cmd|sh|yml|yaml|toml|ini|cfg|xml|svg|pdf|png|jpe?g|gif|webp)(?::\d+(?::\d+)?)?$/i
+
+// ---- Arrange mode: blocks (the logo, the top player, the buttons, the
+// spectrum, every panel) dragged between slots (the rows and columns that
+// carry data-slot). What sits where is kept under 'places' and put back
+// at the start; a theme keeps it too.
+const SLOT_KIND = { brand: 'row', transport: 'row', statusbar: 'row', centerTop: 'col', leftBottom: 'col', right: 'col', right2: 'col' }
+const isPanel = node => node.classList.contains('panel')
+const isBlock = node => node instanceof HTMLElement && (node.dataset.block !== undefined || isPanel(node))
+const blockId = node => node.dataset.block ?? `panel:${node.dataset.panel}`
+const blockNode = id =>
+  String(id).startsWith('panel:') ? document.querySelector(`.cols .panel[data-panel="${CSS.escape(String(id).slice(6))}"]`) : document.querySelector(`[data-block="${CSS.escape(String(id))}"]`)
+// A panel is a column thing; the rest can sit in a row or a column.
+const fitsSlot = (node, slot) => SLOT_KIND[slot?.dataset.slot] !== undefined && (!isPanel(node) || SLOT_KIND[slot.dataset.slot] === 'col')
+
+/** Marks a block for where it now sits, and keeps the Widgets button last in its column. */
+const settleBlock = node => {
+  const slot = node.parentElement?.dataset.slot
+  node.dataset.home ??= slot ?? ''
+  node.classList.toggle('moved', slot !== node.dataset.home)
+  node.classList.toggle('in-col', !isPanel(node) && SLOT_KIND[slot] === 'col')
+  node.classList.toggle('in-row', !isPanel(node) && SLOT_KIND[slot] === 'row')
+  const chooser = document.querySelector('.wg-chooser')
+
+  if (chooser && chooser.parentElement.lastElementChild !== chooser) {
+    chooser.parentElement.append(chooser)
+  }
+}
+
+const savePlaces = () => {
+  const places = {}
+
+  for (const slot of document.querySelectorAll('[data-slot]')) {
+    places[slot.dataset.slot] = [...slot.children].filter(isBlock).map(blockId)
+  }
+  localStorage.setItem('places', JSON.stringify(places))
+}
+
+/** Puts every block where it was last left. Nothing moves until something has been arranged. */
+const putPlaces = () => {
+  for (const node of document.querySelectorAll('[data-block], .cols .panel')) {
+    node.dataset.home ??= node.parentElement?.dataset.slot ?? ''
+  }
+
+  let places = null
+
+  try {
+    places = JSON.parse(localStorage.getItem('places') ?? 'null')
+  } catch {
+    places = null
+  }
+
+  if (!places || typeof places !== 'object') {
+    return
+  }
+
+  for (const [name, ids] of Object.entries(places)) {
+    const slot = document.querySelector(`[data-slot="${CSS.escape(name)}"]`)
+
+    for (const id of slot && Array.isArray(ids) ? ids : []) {
+      const node = blockNode(id)
+
+      if (node && fitsSlot(node, slot)) {
+        slot.append(node)
+        settleBlock(node)
+      }
+    }
+  }
+}
+
+let isArranging = false
+let moving = null
+const clearDropMarks = () => {
+  for (const one of document.querySelectorAll('.drop-here, .drop-before')) {
+    one.classList.remove('drop-here', 'drop-before')
+  }
+}
+
+/** The block the dragged one would land in front of: the first whose middle is past the pointer. */
+const blockAfter = (slot, event) => {
+  const isRow = SLOT_KIND[slot.dataset.slot] === 'row'
+
+  return (
+    [...slot.children].filter(one => isBlock(one) && one !== moving).find(one => {
+      const box = one.getBoundingClientRect()
+
+      return isRow ? event.clientX < box.left + box.width / 2 && event.clientY < box.bottom : event.clientY < box.top + box.height / 2
+    }) ?? null
+  )
+}
+
+const setArranging = isOn => {
+  isArranging = isOn
+  moving = null
+  clearDropMarks()
+  document.body.classList.toggle('arranging', isOn)
+
+  for (const node of document.querySelectorAll('[data-block], .cols .panel')) {
+    node.draggable = isOn
+  }
+  document.querySelector('.arrange-bar')?.remove()
+
+  if (isOn) {
+    const bar = el('div', 'arrange-bar')
+    const reset = el('button', 'pill', 'Put everything back')
+    reset.addEventListener('click', () => {
+      localStorage.removeItem('places')
+      void call('app:reload')
+    })
+    const done = el('button', 'pill go', 'Done')
+    done.addEventListener('click', () => setArranging(false))
+    bar.append(el('span', '', 'Arranging: drag the logo, the top player, the buttons, the spectrum or a panel to any outlined area.'), reset, done)
+    document.body.append(bar)
+  }
+}
+
+// While arranging, these take every drag before the panels' own handlers see it.
+document.addEventListener(
+  'dragstart',
+  event => {
+    if (!isArranging) {
+      return
+    }
+    event.stopPropagation()
+    moving = event.target instanceof Element ? event.target.closest('[data-block], .cols .panel') : null
+
+    if (moving && event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move'
+      event.dataTransfer.setData('text/plain', blockId(moving))
+    }
+  },
+  true,
+)
+document.addEventListener(
+  'dragover',
+  event => {
+    if (!isArranging || !moving) {
+      return
+    }
+    event.stopPropagation()
+    clearDropMarks()
+    const slot = event.target instanceof Element ? event.target.closest('[data-slot]') : null
+
+    if (slot && fitsSlot(moving, slot)) {
+      event.preventDefault()
+      slot.classList.add('drop-here')
+      blockAfter(slot, event)?.classList.add('drop-before')
+    }
+  },
+  true,
+)
+document.addEventListener(
+  'drop',
+  event => {
+    if (!isArranging || !moving) {
+      return
+    }
+    event.stopPropagation()
+    event.preventDefault()
+    const slot = event.target instanceof Element ? event.target.closest('[data-slot]') : null
+
+    if (slot && fitsSlot(moving, slot)) {
+      const next = blockAfter(slot, event)
+      next ? slot.insertBefore(moving, next) : slot.append(moving)
+      settleBlock(moving)
+      savePlaces()
+      savePanels()
+    }
+    clearDropMarks()
+    moving = null
+  },
+  true,
+)
+document.addEventListener(
+  'dragend',
+  () => {
+    clearDropMarks()
+    moving = null
+  },
+  true,
+)
+
+// Where the sections of the window sit: each choice is a class on the page.
+const LAYOUT_CHOICES = [
+  ['projects', 'Projects column', [['left', 'Left of the chat'], ['right', 'Right of the chat']]],
+  ['panels', 'Side panels', [['right', 'Right side'], ['left', 'Left side']]],
+  ['status', 'Status bar', [['top', 'Above the chat'], ['bottom', 'At the bottom']]],
+  ['eq', 'Top spectrum', [['m', 'Medium'], ['s', 'Small'], ['l', 'Large']]],
+]
+const layout = (() => {
+  try {
+    const kept = JSON.parse(localStorage.getItem('layout') ?? '{}')
+
+    return kept && typeof kept === 'object' ? kept : {}
+  } catch {
+    return {}
+  }
+})()
+// Typefaces for the window's text. The first group comes with Windows; the
+// second are free, open-source typefaces, offered when they are installed on
+// this computer. Nothing is downloaded and no font file is part of Cla-Amp.
+const FONTS_WINDOWS = ['Segoe UI', 'Calibri', 'Verdana', 'Tahoma', 'Trebuchet MS', 'Bahnschrift', 'Georgia', 'Cambria', 'Consolas', 'Courier New']
+const FONTS_OPEN = [
+  'Cascadia Mono', 'Cascadia Code', 'Inter', 'Roboto', 'Open Sans', 'Noto Sans', 'Source Sans 3', 'IBM Plex Sans', 'Lato', 'Nunito', 'Ubuntu', 'Work Sans',
+  'Atkinson Hyperlegible', 'OpenDyslexic', 'Comic Neue', 'JetBrains Mono', 'Fira Code', 'IBM Plex Mono', 'Source Code Pro', 'Roboto Mono',
+]
+// A typeface is here when text set in it measures differently from the
+// fallback it would otherwise get (tried against two fallbacks, since it could match one by chance).
+const fontProbe = document.createElement('canvas').getContext('2d')
+const hasFont = name => {
+  const wide = family => {
+    fontProbe.font = `72px ${family}`
+
+    return fontProbe.measureText('mmwwlliiQ@0123').width
+  }
+
+  return ['monospace', 'serif'].some(base => wide(`"${name}", ${base}`) !== wide(base))
+}
+// The parts of the status bar: each can be shown or hidden (Widgets, Status bar shows).
+const STATUS_ITEMS = [
+  ['agents', 'Agents running'],
+  ['context', 'Context'],
+  ['branch', 'Branch'],
+  ['model', 'Model'],
+  ['effort', 'Effort'],
+  ['limits', 'Usage limits'],
+  ['date', 'Date'],
+  ['time', 'Time'],
+  ['state', 'Chat status'],
+]
+const statusItems = (() => {
+  const usual = { agents: true, context: true, branch: true, state: true, model: false, effort: false, limits: false, date: false, time: false }
+
+  try {
+    return { ...usual, ...JSON.parse(localStorage.getItem('statusItems') ?? '{}') }
+  } catch {
+    return usual
+  }
+})()
+const putStatusItems = () => {
+  const bar = document.querySelector('.statusbar')
+  let isFirst = true
+
+  for (const child of bar.children) {
+    if (child.classList.contains('grow')) {
+      // The parts pushed to the far end start a group of their own.
+      isFirst = true
+    }
+
+    if (!child.classList.contains('sb-item')) {
+      continue
+    }
+
+    const isOn = statusItems[child.dataset.sb] === true
+    child.classList.toggle('hidden', !isOn)
+    child.classList.toggle('lined', isOn && !isFirst && child.dataset.sb !== 'state')
+    isFirst = isFirst && !isOn
+  }
+  // With every part off, and nothing dragged into it, the bar itself goes.
+  bar.classList.toggle('sb-none', !STATUS_ITEMS.some(([id]) => statusItems[id] === true) && bar.querySelector('[data-block]') === null)
+}
+putStatusItems()
+
+const putLayout = () => {
+  // The person's typeface goes in front of the skin's own, which stays as the fallback.
+  const font = typeof layout.font === 'string' && [...FONTS_WINDOWS, ...FONTS_OPEN].includes(layout.font) ? layout.font : ''
+  font ? document.body.style.setProperty('--font', `'${font}', 'Segoe UI', system-ui, sans-serif`) : document.body.style.removeProperty('--font')
+  document.body.classList.toggle('projects-right', layout.projects === 'right')
+  document.body.classList.toggle('panels-left', layout.panels === 'left')
+  document.body.classList.toggle('status-bottom', layout.status === 'bottom')
+  document.body.classList.toggle('eq-s', layout.eq === 's')
+  document.body.classList.toggle('eq-l', layout.eq === 'l')
+}
+putLayout()
+
 // The one class a reply keeps: a code block's language, for the colouring.
 DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
   if (data.attrName === 'class' && node.nodeName === 'CODE' && /^language-[\w+#.-]{1,30}$/.test(data.attrValue)) {
@@ -406,13 +761,195 @@ DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
   }
 })
 
+/**
+ * The picture viewer: a picture from the chat, shown over the whole window
+ * and not inside the chat. It starts fitted to the window; a click on it
+ * switches to its real size (scroll to move about) and back. Escape, the
+ * cross, or a click beside the picture closes it.
+ */
+const viewPicture = (src, name = '') => {
+  document.querySelector('.pic-view')?.remove()
+  const box = el('div', 'pic-view')
+  const stage = el('div', 'pic-stage')
+  const picture = el('img')
+  picture.src = src
+  picture.alt = name
+  picture.title = 'Click for its real size, and again to fit the window'
+  const bar = el('div', 'pic-bar')
+  const size = el('span', '', name)
+  const shut = el('button', 'pill', 'Close')
+  shut.type = 'button'
+  shut.title = 'Close (Escape)'
+  bar.append(size, shut)
+  stage.append(picture)
+  box.append(bar, stage)
+  const close = () => {
+    box.remove()
+    document.removeEventListener('keydown', onKey, true)
+  }
+  const onKey = event => {
+    if (event.key === 'Escape') {
+      event.stopPropagation()
+      close()
+    }
+  }
+  picture.addEventListener('load', () => (size.textContent = [name, `${picture.naturalWidth} \u00d7 ${picture.naturalHeight}`].filter(Boolean).join('  \u00b7  ')))
+  picture.addEventListener('click', event => {
+    event.stopPropagation()
+    box.classList.toggle('real')
+  })
+  stage.addEventListener('click', close)
+  shut.addEventListener('click', close)
+  document.addEventListener('keydown', onKey, true)
+  document.body.append(box)
+  shut.focus()
+}
+
+/** Makes a name in a reply open the file viewer when clicked. */
+const asFileLink = (node, name) => {
+  node.classList.add('file-link')
+  node.title = `${name}\nClick to view this file`
+  node.tabIndex = 0
+  node.setAttribute('role', 'button')
+  node.addEventListener('click', event => {
+    event.preventDefault()
+    void openFile(name)
+  })
+  node.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      void openFile(name)
+    }
+  })
+}
+
+// The file viewer: one sheet, made when first used.
+let fileSheet = null
+
+/**
+ * Shows a file named in a reply: Markdown drawn as a page, other text with
+ * its colours, a picture as it is. Anything else can be shown in its
+ * folder; a page or a PDF can be opened in the browser.
+ */
+const openFile = async name => {
+  const id = activeId
+  const got = isDemo ? { name, file: name, kind: 'markdown', text: `# ${name}\n\nThis is the **demo**: a real file would be shown here.\n\n- one\n- two\n`, size: 60 } : await call('file:view', id, name)
+
+  if (!got || got.error) {
+    alert(got?.error ?? 'That file could not be read.')
+
+    return
+  }
+
+  if (fileSheet === null) {
+    fileSheet = el('dialog', 'sheet file-sheet')
+    document.body.append(fileSheet)
+    fileSheet.addEventListener('click', event => {
+      if (event.target === fileSheet) {
+        fileSheet.close()
+      }
+    })
+  }
+
+  const head = el('div', 'file-head')
+  const title = el('div', 'file-title')
+  title.append(el('b', '', got.name), el('small', '', got.file))
+  const button = (label, tip, run) => {
+    const one = el('button', 'pill', label)
+    one.type = 'button'
+    one.title = tip
+    one.addEventListener('click', () => run(one))
+
+    return one
+  }
+  head.append(
+    title,
+    button('Copy path', 'Copy where this file is', one => {
+      void call('text:copy', got.file)
+      one.textContent = 'Copied'
+      setTimeout(() => (one.textContent = 'Copy path'), 1200)
+    }),
+    button('Show in folder', 'Open the folder this file is in', () => void call('file:reveal', id, name)),
+  )
+
+  if (got.canBrowse) {
+    head.append(button('Open in browser', "Open this page in Cla-Amp's own browser, attached to this window", () => void call('file:browser', id, name)))
+  }
+
+  if (got.kind === 'markdown') {
+    // A Markdown file can be read as a page or as it is written.
+    const flip = button('Show as written', 'Switch between the page and the text as it is written', () => {
+      const isRaw = body.classList.toggle('raw')
+      flip.textContent = isRaw ? 'Show as a page' : 'Show as written'
+      body.replaceChildren(isRaw ? rawText(got.text, 'markdown') : markdown(got.text))
+    })
+    head.append(flip)
+  }
+  const close = button('Close', 'Close the viewer', () => fileSheet.close())
+  close.classList.add('go')
+  head.append(close)
+  const rawText = (text, language) => {
+    const block = el('pre', 'file-text')
+    const code = el('code', '', text)
+    block.append(code)
+
+    if (language && hljs.getLanguage(language) && text.length < 400000) {
+      code.className = `language-${language}`
+      hljs.highlightElement(code)
+    }
+
+    return block
+  }
+  const body = el('div', 'file-body')
+
+  if (got.kind === 'markdown') {
+    body.append(markdown(got.text))
+  } else if (got.kind === 'text') {
+    body.append(rawText(got.text, { mjs: 'javascript', cjs: 'javascript', js: 'javascript', ts: 'typescript', tsx: 'typescript', jsx: 'javascript', py: 'python', ps1: 'powershell', yml: 'yaml', htm: 'xml', html: 'xml', svg: 'xml', sh: 'bash', bat: 'dos', cmd: 'dos', gd: 'gdscript' }[got.language] ?? got.language))
+  } else if (got.kind === 'picture') {
+    const picture = el('img')
+    picture.src = got.url
+    picture.alt = got.name
+    body.append(picture)
+  } else {
+    body.append(el('p', 'sheet-note', got.note ?? 'This file cannot be shown here.'))
+  }
+
+  fileSheet.replaceChildren(head, body)
+
+  if (!fileSheet.open) {
+    fileSheet.showModal()
+  }
+  body.scrollTop = 0
+}
+
 const markdown = text => {
   const holder = el('div', 'msg-body')
   holder.innerHTML = DOMPurify.sanitize(marked.parse(String(text ?? ''), { gfm: true, breaks: false }), CLEAN)
 
   // A link's words can differ from where it leads: the address shows on hover.
   for (const link of holder.querySelectorAll('a[href]')) {
-    link.title = link.getAttribute('href')
+    const href = link.getAttribute('href')
+
+    if (href.startsWith('#file:')) {
+      let name = href.slice(6)
+
+      try {
+        name = decodeURIComponent(name)
+      } catch {
+        // Kept as written.
+      }
+      link.removeAttribute('href')
+      asFileLink(link, name)
+    } else {
+      link.title = href
+    }
+  }
+
+  // A file's name written in code type opens the same way.
+  for (const code of holder.querySelectorAll('code')) {
+    if (code.parentElement?.nodeName !== 'PRE' && !code.closest('a') && FILE_NAME.test(code.textContent.trim())) {
+      asFileLink(code, code.textContent.trim())
+    }
   }
 
   for (const code of holder.querySelectorAll('pre > code')) {
@@ -488,7 +1025,8 @@ const paintTools = parts => {
   const first = parts[0]
   const group = el('details', 'ran own')
   const summary = el('summary', '', groupLabel(parts))
-  group.open = first.isGroupOpen === true
+  // A group of file changes starts unfolded, so the changes can be read without a click; other groups start folded.
+  group.open = first.isGroupOpen ?? parts.every(part => ['Edit', 'Write', 'NotebookEdit'].includes(part.name))
   summary.addEventListener('click', () => (first.isGroupOpen = !group.open))
   group.append(summary, ...parts.map(paintTool))
 
@@ -514,8 +1052,7 @@ const paintPictures = parts => {
     picture.src = src
     picture.loading = 'lazy'
     picture.alt = `Picture from ${part.name}`
-    picture.title = `${toolSays(part)}. Click to see it larger or smaller.`
-    picture.addEventListener('click', () => picture.classList.toggle('big'))
+    picture.title = `${toolSays(part)}. Click to open it in the picture viewer.`
     box.append(picture)
   }
 
@@ -642,6 +1179,7 @@ const ACT_ICONS = {
   done: '<path d="M3 8.5l3.2 3.2L13 4.8"/>',
   fork: '<circle cx="4.5" cy="3.5" r="1.5"/><circle cx="11.5" cy="3.5" r="1.5"/><circle cx="8" cy="12.5" r="1.5"/><path d="M4.5 5v1.5a2 2 0 0 0 2 2h3a2 2 0 0 0 2-2V5M8 8.5V11"/>',
   pin: '<path d="M9.5 2.5l4 4-2 .6-2.2 2.2.2 2.7-1 1-2.6-2.6L3 13.3 2.7 13l2.9-2.9L3 7.5l1-1 2.7.2 2.2-2.2z"/>',
+  quote: '<path d="M3 11.5c1.6-.6 2.5-1.8 2.5-3.5V5H2.5v3.5H4M9.5 11.5c1.6-.6 2.5-1.8 2.5-3.5V5H9v3.5h1.5"/>',
   read: '<path d="M2.5 6.5v3h2.3l3.2 2.7V3.8L4.8 6.5z"/><path d="M10.5 6a3 3 0 0 1 0 4M12.3 4.2a5.5 5.5 0 0 1 0 7.6"/>',
   stop: '<rect x="4" y="4" width="8" height="8" rx="1.5"/>',
 }
@@ -674,6 +1212,8 @@ const paintActions = item => {
     }, 1500)
   })
 
+  add('quote', 'Quote: put the text you marked in this reply (or the whole reply) in your message', () => quote(markedInChat() || text))
+
   if (item.uuid) {
     add('fork', 'Fork: start a new chat that holds this one up to this reply. This chat stays as it is.', async button => {
       button.disabled = true
@@ -687,6 +1227,7 @@ const paintActions = item => {
       }
 
       // The fork holds the same messages, so without a word it looks as if nothing happened.
+      project.chatId = opened.forkId ?? project.chatId
       showConversation(project, opened.events)
       project.items.push({ kind: 'note', text: 'Forked: this is a new chat that holds the old one up to the reply you chose. The chat you forked from is unchanged and still in the Code tab.' })
       openChatId = opened.forkId ?? openChatId
@@ -744,21 +1285,248 @@ const paintActions = item => {
   return row
 }
 
+/** The least width the chat keeps: columns stop growing, and the window stops narrowing, at it. */
+const CHAT_LEAST = 460
+
+// ---- changes to files, drawn line by line.
+const CODE_KIND = { mjs: 'javascript', cjs: 'javascript', js: 'javascript', ts: 'typescript', tsx: 'typescript', jsx: 'javascript', py: 'python', ps1: 'powershell', yml: 'yaml', htm: 'xml', html: 'xml', svg: 'xml', sh: 'bash', bat: 'dos', cmd: 'dos', gd: 'gdscript', md: 'markdown', rs: 'rust', cs: 'csharp', rb: 'ruby' }
+const codeKindOf = file => {
+  const end = String(file ?? '').split('.').pop().toLowerCase()
+  const kind = CODE_KIND[end] ?? end
+
+  return hljs.getLanguage(kind) ? kind : ''
+}
+
+/** Two texts, line by line: [kind, line] with kind 'ctx' (in both), 'del' (only before) or 'add' (only after). */
+const lineDiff = (before, after) => {
+  // A last line's own ending is not one more, empty line.
+  const linesOf = text => (text === '' ? [] : text.replace(/\r?\n$/, '').split('\n'))
+  const a = linesOf(before)
+  const b = linesOf(after)
+
+  // Too long to compare line against line: the old text, then the new.
+  if (a.length * b.length > 250000) {
+    return [...a.map(line => ['del', line]), ...b.map(line => ['add', line])]
+  }
+
+  // The longest run of lines the two share, found from the end backwards.
+  const most = Array.from({ length: a.length + 1 }, () => new Uint16Array(b.length + 1))
+
+  for (let i = a.length - 1; i >= 0; i -= 1) {
+    for (let j = b.length - 1; j >= 0; j -= 1) {
+      most[i][j] = a[i] === b[j] ? most[i + 1][j + 1] + 1 : Math.max(most[i + 1][j], most[i][j + 1])
+    }
+  }
+
+  const lines = []
+  let i = 0
+  let j = 0
+
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) {
+      lines.push(['ctx', a[i]])
+      i += 1
+      j += 1
+    } else if (j < b.length && (i >= a.length || most[i][j + 1] > most[i + 1][j])) {
+      lines.push(['add', b[j]])
+      j += 1
+    } else {
+      lines.push(['del', a[i]])
+      i += 1
+    }
+  }
+
+  return lines
+}
+
+/** How many lines a change puts in and takes out. */
+const diffCount = (before, after) => {
+  const lines = lineDiff(String(before ?? '').slice(0, 60000), String(after ?? '').slice(0, 60000))
+
+  return { plus: lines.filter(one => one[0] === 'add').length, minus: lines.filter(one => one[0] === 'del').length }
+}
+
+const diffStat = ({ plus, minus }) => {
+  const stat = el('span', 'diff-stat')
+  stat.append(el('span', 'plus', `+${plus}`), el('span', 'minus', `\u2212${minus}`))
+  stat.title = `${plus} ${plus === 1 ? 'line' : 'lines'} put in, ${minus} taken out`
+
+  return stat
+}
+
+/** Wraps the letters from `from` up to `to` of a line in a mark, whatever colour spans they lie in. */
+const markPart = (code, from, to) => {
+  if (to <= from) {
+    return
+  }
+
+  const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT)
+  const texts = []
+
+  while (walker.nextNode()) {
+    texts.push(walker.currentNode)
+  }
+
+  let at = 0
+
+  for (const text of texts) {
+    const end = at + text.data.length
+    const start = Math.max(from, at)
+    const stop = Math.min(to, end)
+
+    if (stop > start) {
+      const part = start > at ? text.splitText(start - at) : text
+
+      if (stop < end) {
+        part.splitText(stop - start)
+      }
+
+      const mark = document.createElement('mark')
+      part.replaceWith(mark)
+      mark.append(part)
+    }
+    at = end
+  }
+}
+
+/** Where two lines differ: what they share at the start and at the end is left out. */
+const changedPart = (before, after) => {
+  let head = 0
+
+  while (head < before.length && head < after.length && before[head] === after[head]) {
+    head += 1
+  }
+
+  let tail = 0
+
+  while (tail < before.length - head && tail < after.length - head && before[before.length - 1 - tail] === after[after.length - 1 - tail]) {
+    tail += 1
+  }
+
+  // Lines with too little in common are simply different lines: the whole line's shade says so.
+  return head + tail < Math.min(before.length, after.length) * 0.3 ? null : { head, tail }
+}
+
+/** A change drawn line by line, the code in its colours. */
+const diffView = (before, after, file) => {
+  const box = el('div', 'diff')
+  const kind = codeKindOf(file)
+  const lines = lineDiff(String(before ?? '').slice(0, 60000), String(after ?? '').slice(0, 60000))
+  const MOST = 600
+
+  for (const [what, text] of lines.slice(0, MOST)) {
+    const row = el('div', `dl ${what}`)
+    const code = el('code')
+
+    if (kind && text.length < 2000) {
+      // highlight.js returns its own markup with the text escaped.
+      code.innerHTML = hljs.highlight(text, { language: kind, ignoreIllegals: true }).value
+    } else {
+      code.textContent = text
+    }
+    row.append(el('span', 'dm', what === 'add' ? '+' : what === 'del' ? '\u2212' : ''), code)
+    box.append(row)
+  }
+
+  // A run of lines taken out followed by as many put in is the same lines rewritten:
+  // in each pair, the part that changed gets the stronger shade.
+  const rows = [...box.querySelectorAll('.dl')]
+
+  for (let i = 0; i < rows.length; i += 1) {
+    if (!rows[i].classList.contains('del') || rows[i - 1]?.classList.contains('del')) {
+      continue
+    }
+
+    let dels = 0
+
+    while (rows[i + dels]?.classList.contains('del')) {
+      dels += 1
+    }
+
+    let adds = 0
+
+    while (rows[i + dels + adds]?.classList.contains('add')) {
+      adds += 1
+    }
+
+    for (let k = 0; dels === adds && k < dels; k += 1) {
+      const out = rows[i + k].querySelector('code')
+      const put = rows[i + dels + k].querySelector('code')
+      const part = changedPart(out.textContent, put.textContent)
+
+      if (part) {
+        markPart(out, part.head, out.textContent.length - part.tail)
+        markPart(put, part.head, put.textContent.length - part.tail)
+      }
+    }
+  }
+
+  if (lines.length > MOST) {
+    box.append(el('div', 'diff-more', `${lines.length - MOST} more lines are not shown here. Click the file's name to see all of it.`))
+  }
+
+  return box
+}
+
+/** The files a reply changed, each with its count and a click to open it. */
+const paintFiles = item => {
+  const files = new Map()
+
+  for (const part of item.parts) {
+    const input = part.input ?? {}
+
+    if (part.type !== 'tool' || !part.isDone || part.isError || typeof input.file_path !== 'string' || !['Edit', 'Write', 'NotebookEdit'].includes(part.name)) {
+      continue
+    }
+
+    const count = part.name === 'Edit' ? diffCount(input.old_string, input.new_string) : diffCount('', input.content ?? input.new_source ?? '')
+    const kept = files.get(input.file_path) ?? { plus: 0, minus: 0, edits: 0, writes: 0 }
+    files.set(input.file_path, { plus: kept.plus + count.plus, minus: kept.minus + count.minus, edits: kept.edits + (part.name === 'Write' ? 0 : 1), writes: kept.writes + (part.name === 'Write' ? 1 : 0) })
+  }
+
+  if (files.size === 0) {
+    return ''
+  }
+
+  const box = el('div', 'files-changed')
+  box.append(el('b', '', files.size === 1 ? '1 file changed' : `${files.size} files changed`))
+
+  for (const [file, count] of files) {
+    const row = el('div', 'fc-row')
+    const name = el('span', '', baseName(file))
+    asFileLink(name, file)
+    row.append(name, diffStat(count), el('small', '', [count.writes > 0 ? (count.writes > 1 ? `written ${count.writes} times` : 'written') : '', count.edits > 0 ? (count.edits > 1 ? `edited ${count.edits} times` : 'edited') : ''].filter(Boolean).join(', then ')))
+    box.append(row)
+  }
+
+  return box
+}
+
 const paintTool = part => {
   const box = el('details', `tool own${part.isDone ? (part.isError ? ' failed' : ' done') : ' running'}`)
   const summary = el('summary')
   // A command still running shows what it is doing; once done it folds, unless the person opened it.
-  box.open = part.isOpen ?? (!part.isDone && typeof part.input.command === 'string')
+  // A change to a file shows itself; so does a command still running. The rest start folded.
+  box.open = part.isOpen ?? (['Edit', 'Write'].includes(part.name) || (!part.isDone && typeof part.input.command === 'string'))
   summary.addEventListener('click', () => (part.isOpen = !box.open))
-  summary.append(el('b', '', part.name), el('span', '', toolSays(part)))
+  const input = part.input
+  const says = el('span', '', toolSays(part))
+  const isEdit = part.name === 'Edit' && typeof input.old_string === 'string'
+  const isWrite = part.name === 'Write' && typeof input.content === 'string'
+  summary.append(el('b', '', part.name), says)
+
+  // A change to a file: the file's name opens it, and the card says how many lines went in and out.
+  if ((isEdit || isWrite) && typeof input.file_path === 'string') {
+    asFileLink(says, input.file_path)
+    summary.append(diffStat(isEdit ? diffCount(input.old_string, input.new_string) : diffCount('', input.content)))
+  }
   summary.append(el('i', '', part.isDone ? (part.isError ? '\u2717' : '\u2713') : '\u2026'))
   box.append(summary)
-  const input = part.input
 
-  if (part.name === 'Edit' && typeof input.old_string === 'string') {
-    box.append(el('pre', 'del', input.old_string.slice(0, 4000)), el('pre', 'add', String(input.new_string ?? '').slice(0, 4000)))
-  } else if (part.name === 'Write' && typeof input.content === 'string') {
-    box.append(el('pre', 'add', input.content.slice(0, 6000)))
+  if (isEdit) {
+    box.append(diffView(input.old_string, input.new_string ?? '', input.file_path))
+  } else if (isWrite) {
+    box.append(diffView('', input.content, input.file_path))
   } else if (typeof input.command === 'string') {
     box.append(el('pre', '', `$ ${input.command}`))
   } else {
@@ -833,11 +1601,14 @@ const paintAsk = ask => {
     }
   } else if (typeof input.file_path === 'string' && typeof input.old_string === 'string') {
     show(input.file_path)
-    show(input.old_string, 'del')
-    show(input.new_string ?? '', 'add')
+    const change = diffView(input.old_string, input.new_string ?? '', input.file_path)
+    shown.push(change)
+    box.append(change)
   } else if (typeof input.file_path === 'string' && typeof input.content === 'string') {
     show(input.file_path)
-    show(input.content, 'add')
+    const change = diffView('', input.content, input.file_path)
+    shown.push(change)
+    box.append(change)
   } else {
     show(JSON.stringify(input, null, 2))
   }
@@ -892,6 +1663,21 @@ const paint = item => {
 
   if (isUser) {
     main.append(el('div', 'msg-body plain', item.text))
+
+    // Pictures attached to the message.
+    if ((item.pictures ?? []).length > 0) {
+      const box = el('div', 'tool-pics')
+
+      for (const src of item.pictures.filter(one => String(one).startsWith('file:'))) {
+        const picture = el('img')
+        picture.src = src
+        picture.loading = 'lazy'
+        picture.alt = 'Attached picture'
+        picture.title = 'Click to open it in the picture viewer.'
+        box.append(picture)
+      }
+      main.append(box)
+    }
   } else if (item.kind === 'ask') {
     main.append(paintAsk(item))
   } else {
@@ -944,6 +1730,11 @@ const paint = item => {
     // read from its file is still the "current" one, but nothing is writing it.
     const isBeingWritten = item === active()?.current && (active()?.status === 'working' || elsewhere(active()) !== undefined)
 
+    // Which files this reply changed, once it is whole.
+    if (!isBeingWritten) {
+      main.append(paintFiles(item))
+    }
+
     if (!isBeingWritten && !item.parts.some(part => part.isLive) && replyText(item).trim() !== '') {
       main.append(paintActions(item))
     }
@@ -953,6 +1744,8 @@ const paint = item => {
 }
 
 let chatFor = null
+// Whether the chat keeps to its end as a reply arrives (set by followChat's listeners below).
+let isFollowingChat = true
 
 /**
  * The card a new person sees: what Cla-Amp is, then sign in, pick a
@@ -1017,6 +1810,8 @@ const renderChat = () => {
 
   if (chatFor !== activeId) {
     chatFor = activeId
+    // Another chat, or this one read anew: it opens at its end.
+    isFollowingChat = true
     chat.replaceChildren()
 
     for (const item of project?.items ?? []) {
@@ -1042,7 +1837,11 @@ const renderChat = () => {
   }
 
   chat.querySelector('.welcome')?.remove()
-  const isAtEnd = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 80
+  // Following the end is the person's choice (see followChat), not a guess
+  // from where the view happens to be: a reply that grows by a screenful at
+  // once must not end the following, and a small scroll up must end it.
+  const isAtEnd = isFollowingChat
+  const keptTop = chat.scrollTop
 
   for (const item of project.items) {
     if (!item.node) {
@@ -1054,6 +1853,18 @@ const renderChat = () => {
       const open = [...item.node.querySelectorAll('details:not(.own)')].map(one => one.open)
       const fresh = paint(item)
       fresh.querySelectorAll('details:not(.own)').forEach((one, i) => (one.open = open[i] ?? false))
+      // A picture already on show is kept as it is. Drawn anew it would be
+      // empty for a moment, and the chat would jump with every word that arrives.
+      const loaded = new Map([...item.node.querySelectorAll('img')].filter(one => one.complete && one.naturalWidth > 0).map(one => [one.getAttribute('src'), one]))
+
+      for (const picture of fresh.querySelectorAll('img')) {
+        const old = loaded.get(picture.getAttribute('src'))
+
+        if (old && old.className === picture.className) {
+          loaded.delete(picture.getAttribute('src'))
+          picture.replaceWith(old)
+        }
+      }
       item.node.replaceWith(fresh)
       item.node = fresh
       item.isDirty = false
@@ -1065,7 +1876,35 @@ const renderChat = () => {
 
   if (isAtEnd) {
     chat.scrollTop = chat.scrollHeight
+  } else if (chat.scrollTop !== keptTop) {
+    // Reading further up: the view stays exactly where it is while the reply grows below.
+    chat.scrollTop = keptTop
   }
+}
+
+// Whether the chat keeps to its end as a reply arrives. Scrolling up, even a
+// little, stops it; coming back to the end starts it again.
+{
+  const chat = $('chat')
+  chat.addEventListener('scroll', () => {
+    isFollowingChat = chat.scrollHeight - chat.scrollTop - chat.clientHeight < 24
+  })
+  // The person's own wheel or keys count at once, before the view has moved far.
+  chat.addEventListener('wheel', event => {
+    if (event.deltaY < 0) {
+      isFollowingChat = false
+    }
+  }, { passive: true })
+  // A picture that finishes loading makes the chat taller: stay at the end if that is where the person is.
+  chat.addEventListener(
+    'load',
+    event => {
+      if (isFollowingChat && event.target instanceof HTMLImageElement) {
+        chat.scrollTop = chat.scrollHeight
+      }
+    },
+    true,
+  )
 }
 
 /** The work another app (the desktop app, a terminal) is doing in this chat right now, if any. */
@@ -1209,13 +2048,26 @@ Nothing is deleted: its chats stay saved (find them again with Open chat, the Co
   if (waiting.length === 0) {
     queue.append(el('div', 'empty', 'Nothing queued. Messages you send while Claude is working wait here.'))
   }
-  waiting.forEach((text, index) => {
+  // Each waiting message, in the Queue tab and above the message box: send it now, or take it out.
+  const waitingRow = (text, index) => {
     const row = el('div', 'q-item')
+    const now = el('button', 'now', 'Send now')
+    now.title = 'Stop what Claude is doing and send this message at once. The other waiting messages follow in their order.'
+    now.addEventListener('click', () => void call('queue:now', activeId, index))
     const drop = el('button', '', '\u2715')
+    drop.title = 'Take this message out of the queue'
     drop.addEventListener('click', () => void call('queue:remove', activeId, index))
-    row.append(el('b', '', `${index + 1}.`), el('span', '', text), drop)
-    queue.append(row)
-  })
+    const words = el('span', '', text)
+    words.title = text
+    row.append(el('b', '', `${index + 1}.`), words, now, drop)
+
+    return row
+  }
+  queue.append(...waiting.map(waitingRow))
+  $('waitingBar').replaceChildren(...waiting.map(waitingRow))
+  $('waitingBar').classList.toggle('hidden', waiting.length === 0)
+  // The tab says how many are waiting.
+  document.querySelector('.tab[data-tab="queue"]').textContent = waiting.length > 0 ? `Queue (${waiting.length})` : 'Queue'
   $('projectList').classList.toggle('hidden', tab !== 'projects')
   $('queueList').classList.toggle('hidden', tab !== 'queue')
   $('chatList').classList.toggle('hidden', tab !== 'chats')
@@ -1268,7 +2120,7 @@ const openSavedChat = async chat => {
     renderChats()
   }
 
-  const opened = await call('chats:open', chat.id, chat.cwd)
+  const opened = await call('chats:open', chat.id, chat.cwd, activeId)
   document.body.classList.remove('opening')
 
   if (!opened || opened.error) {
@@ -1286,7 +2138,18 @@ const openSavedChat = async chat => {
   }
 
   openChatId = chat.id
-  showConversation(projects.get(opened.project.id) ?? addProject(opened.project), opened.events)
+
+  // A chat that is already open and working is only gone to; its messages are there.
+  if (opened.isOpen && projects.has(opened.project.id)) {
+    chatFor = null
+    void select(opened.project.id)
+
+    return
+  }
+
+  const target = projects.get(opened.project.id) ?? addProject(opened.project)
+  target.chatId = chat.id
+  showConversation(target, opened.events ?? [])
 }
 
 const PR_STATES = { MERGED: 'Merged', OPEN: 'Open', CLOSED: 'Closed' }
@@ -1566,7 +2429,14 @@ const renderWorkList = () => {
 
   for (const one of projects.values()) {
     if (one.status === 'working' || (one.agents ?? 0) > 0) {
-      rows.push(row('work-row', one.name, 'Cla-Amp', one.detail || 'Working', () => void select(one.id)))
+      const load = workLoads[one.id]
+      const using = load ? ` · ${load.cpu === null ? '' : `${load.cpu}% CPU, `}${load.mb >= 1024 ? `${(load.mb / 1024).toFixed(1)} GB` : `${load.mb} MB`}` : ''
+      const line = row('work-row', one.name, `Cla-Amp${using}`, one.detail || 'Working', () => void select(one.id))
+
+      if (load) {
+        line.title = `Open this chat here. Its Claude Code, with its agents and the ${load.count - 1} other ${load.count - 1 === 1 ? 'program' : 'programs'} it started, is using ${load.cpu === null ? '' : `${load.cpu}% of the processor and `}${load.mb} MB of memory.`
+      }
+      rows.push(line)
       rows.push(...(one.subs ?? []).filter(sub => sub.status === 'working').map(sub => row('work-row work-agent', sub.name, sub.kind, '', null)))
     }
   }
@@ -1579,6 +2449,17 @@ const renderWorkList = () => {
 
   box.replaceChildren(el('div', 'work-head', rows.length > 0 ? 'Working now' : 'Nothing is working right now.'), ...rows)
 }
+
+// Processor and memory per chat, by project id: asked every five seconds while the list is open.
+let workLoads = {}
+setInterval(() => {
+  if (!isDemo && !$('workList').classList.contains('hidden')) {
+    void call('work:load').then(said => {
+      workLoads = said ?? {}
+      renderWorkList()
+    })
+  }
+}, 5000)
 
 /** Chats and agents working outside this app, as the main process counts them. */
 let outside = { chats: 0, agents: 0, list: [], here: [] }
@@ -1610,6 +2491,7 @@ const renderStatus = () => {
   const percent = limit > 0 && used > 0 ? `${Math.round(part * 100)}%` : '--'
   $('contextPct').textContent = percent
   $('tokPct').textContent = percent
+  notePeak('contextPeak', part * 100)
   setMeter($('contextMeter'), part)
   setMeter($('tokMeter'), part)
   $('tokHead').textContent = percent === '--' ? 'Nothing used yet' : `${percent} used`
@@ -1618,6 +2500,7 @@ const renderStatus = () => {
   $('tokUsed').parentElement.title = limit > 0 ? `${count(used)} of ${count(limit)} tokens, from the last reply` : 'The limit is known after the first reply'
   $('tokLeft').textContent = limit > 0 && used > 0 ? kilo(Math.max(0, limit - used)) : '--'
   $('branch').textContent = project?.branch || '--'
+  renderBarExtras()
   renderContext()
   // Compacting needs a chat with something in it that nobody is working in.
   const cannotCompact = !project ? 'No project is open' : project.status === 'working' ? 'Claude is working: wait for it to finish' : elsewhere(project) ? 'This chat is being worked on in another app' : !project.hasSession || project.items.length === 0 ? 'There is no chat to compact yet' : ''
@@ -1933,8 +2816,10 @@ const modelName = id => {
 }
 
 /** A ring that is full when nothing is used and empties as the limit is used up. */
-const usageRing = left => {
-  const ring = el('div', `ring${left < 10 ? ' low' : left < 25 ? ' mid' : ''}`)
+// The ring fills as the plan is used, and its number is the share used: the same figure Claude's own apps show.
+const usageRing = used => {
+  const left = used
+  const ring = el('div', `ring${used > 90 ? ' low' : used > 75 ? ' mid' : ''}`)
   const round = 2 * Math.PI * 16
   ring.innerHTML = `<svg viewBox="0 0 40 40" aria-hidden="true"><circle class="ring-back" cx="20" cy="20" r="16"/><circle class="ring-fill" cx="20" cy="20" r="16" stroke-dasharray="${((round * left) / 100).toFixed(1)} ${round.toFixed(1)}" transform="rotate(-90 20 20)"/></svg>`
   ring.append(el('b', '', `${Math.round(left)}%`))
@@ -1942,7 +2827,26 @@ const usageRing = left => {
   return ring
 }
 
+/** The status bar's optional parts: the chat's model, the plan's limits, the date and the time. */
+const renderBarExtras = () => {
+  const project = active()
+  const info = engine.info
+  const picked = info?.models.find(one => one.value === info.model)
+  // The exact model the chat last ran on when a reply has named it, else the one picked for it.
+  $('sbModel').textContent = /^claude-/.test(project?.model ?? '') ? modelName(project.model) : picked ? (picked.value === 'default' ? 'Default' : picked.name) : '--'
+  $('sbEffort').textContent = !info ? '--' : info.effort ? (EFFORT_NAMES[info.effort] ?? info.effort) : 'Auto'
+  const usage = info?.usage
+  const rows = usage?.isAvailable ? usage.rows.filter(row => row.percent !== null) : []
+  const short = label => (/week/i.test(label) ? (/opus|sonnet|haiku|fable/i.exec(label)?.[0] ?? 'Week') : /session|hour|5/i.test(label) ? 'Session' : label)
+  $('sbLimits').textContent = rows.length > 0 ? rows.slice(0, 3).map(row => `${short(row.label)} ${Math.round(row.percent)}%`).join('  \u00b7  ') : 'Limits: --'
+  $('sbLimits').title = rows.length > 0 ? rows.map(row => `${row.label}: ${Math.round(row.percent)}% used. ${startsOver(row.resetsAt)}`).join('\n') : 'Your plan\'s limits show here once they have been read'
+  const now = new Date()
+  $('sbDate').textContent = now.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
+  $('sbTime').textContent = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
 const renderLimits = () => {
+  renderBarExtras()
   const box = $('limits')
   const usage = engine.info?.usage
   box.replaceChildren()
@@ -1956,17 +2860,23 @@ const renderLimits = () => {
     box.append(el('div', 'empty', 'This sign-in has no plan limits to show (an API key or another provider).'))
   } else {
     for (const row of usage.rows) {
-      // The ring and its number say what is left; the line under the name says what is used.
+      // The ring and its number say what is used; the line under the name adds what is left.
       const used = Math.min(100, Math.max(0, row.percent ?? 0))
+
+      // The week's limit for all models, for the calendar's report of the day.
+      if (row === usage.rows.find(each => /week/i.test(each.label))) {
+        notePeak('planUsed', used)
+      }
+
       const one = el('div', 'limit')
       const words = el('div', 'limit-words')
       words.append(
         el('span', 'limit-name', row.label),
-        el('small', '', row.percent === null ? 'Nothing used in this window yet' : `${Math.round(100 - used)}% left, ${Math.round(used)}% used`),
+        el('small', '', row.percent === null ? 'Nothing used in this window yet' : `${Math.round(used)}% used, ${Math.round(100 - used)}% left`),
         el('small', '', row.percent === null ? '' : startsOver(row.resetsAt)),
       )
       one.title = row.percent === null ? `${row.label}: nothing used yet` : `${row.label}: ${Math.round(used)}% used, ${Math.round(100 - used)}% left. ${startsOver(row.resetsAt)}`
-      one.append(usageRing(100 - used), words)
+      one.append(usageRing(used), words)
       box.append(one)
     }
   }
@@ -1984,6 +2894,7 @@ const renderEngine = () => {
   // The exact model the chat last ran on, once a reply has named it.
   $('modelNow').textContent = /^claude-/.test(project?.model ?? '') ? modelName(project.model) : ''
   $('modelNow').title = /^claude-/.test(project?.model ?? '') ? `The model this chat last ran on (${project.model})` : ''
+  renderBarExtras()
 
   for (const one of info?.models ?? []) {
     const option = el('option', '', one.value === 'default' ? `Default (${one.description})` : one.name)
@@ -2352,17 +3263,28 @@ const loadPlugins = async () => {
 }
 
 /** Reads the active project's limits, models and connectors from its Claude Code process. */
+/**
+ * The full answer about a chat's model, effort and limits comes from its
+ * Claude Code process, which takes a few seconds to start. So the panels
+ * are filled at once from what is already known (the same chat's last
+ * answer, else the saved model and effort on the last list of models) and
+ * corrected when the full answer arrives.
+ */
+const engineKept = new Map()
+let engineLast = null
+
 const loadEngine = async () => {
   const id = activeId
+  const key = draftKeyOf(projects.get(id)) ?? id
   clearTimeout(pendingTimer)
   pendingTries = 0
 
-  if (engine.forId !== id) {
-    engine.info = null
+  if (engine.forId !== key) {
+    engine.info = engineKept.has(key) ? structuredClone(engineKept.get(key)) : null
     engine.error = ''
     engine.said = ''
   }
-  engine.forId = id
+  engine.forId = key
 
   if (!id) {
     renderEngineAll()
@@ -2371,15 +3293,36 @@ const loadEngine = async () => {
   }
 
   renderEngineAll()
+
+  if (!isDemo && engineLast) {
+    // Answered at once: the model and effort saved for this chat.
+    const said = await call('project:describe', id).catch(() => null)
+
+    if (activeId !== id || engine.forId !== key) {
+      return
+    }
+
+    if (said?.model) {
+      const base = engine.info ?? structuredClone(engineLast)
+      const models = base.models.some(one => one.value === said.model)
+        ? base.models
+        : [...base.models, { value: said.model, name: modelName(said.model), description: '', efforts: base.models[0]?.efforts ?? [], hasFast: false }]
+      engine.info = { ...base, models, model: said.model, effort: said.effort }
+      renderEngineAll()
+    }
+  }
+
   const got = isDemo ? structuredClone(DEMO_INFO) : await call('session:info', id)
 
-  if (activeId !== id) {
+  if (activeId !== id || engine.forId !== key) {
     return
   }
 
   if (!got || got.error) {
     engine.error = got?.error ?? 'Claude Code did not answer.'
   } else {
+    engineKept.set(key, got)
+    engineLast = got
     engine.info = got
     engine.error = ''
     const project = projects.get(id)
@@ -2446,6 +3389,13 @@ const deck = {
   now: null,
   isShuffle: false,
   isRepeat: false,
+  // The playlists kept in the app, and the one whose songs the list shows ('' for all the songs).
+  playlists: [],
+  playlist: localStorage.getItem('songPlaylist') ?? '',
+  // The songs the search and the filters choose from: the library, or the playlist on show.
+  pool: [],
+  // When shuffling: the song picked to come next, kept so the pick is made once.
+  planned: null,
   // The cover on show: what it belongs to, its address and where it came from.
   cover: { key: '', url: '', from: '' },
   // Covers of what other apps play, by song key (a handful at most).
@@ -2551,7 +3501,52 @@ const playSong = song => {
 
 const randomSong = () => {
   const others = deck.files.filter(song => song !== deck.now)
-  playSong(others[Math.floor(Math.random() * others.length)] ?? deck.files[0])
+  // The song already picked to come next, when there is one, so what was shown as next is what plays.
+  const picked = others.includes(deck.planned) ? deck.planned : others[Math.floor(Math.random() * others.length)]
+  deck.planned = null
+  playSong(picked ?? deck.files[0])
+}
+
+/**
+ * The song that plays when this one ends, known ahead so that it can be made
+ * ready and follow without a gap: this one again on repeat, else the head of
+ * the queue, else one picked at random when shuffling, else the next in the list.
+ */
+const plannedSong = () => {
+  if (deck.isRepeat && deck.now) {
+    return deck.now
+  }
+
+  if (deck.queue.length > 0) {
+    return deck.queue[0]
+  }
+
+  if (deck.isShuffle) {
+    const others = deck.files.filter(song => song !== deck.now)
+
+    if (!others.includes(deck.planned)) {
+      deck.planned = others[Math.floor(Math.random() * others.length)] ?? null
+    }
+
+    return deck.planned
+  }
+
+  return upcoming(1)[0] ?? null
+}
+
+// The song held ready took over by itself as the last one ended: the deck follows.
+tuner.onSwap = file => {
+  const isRepeat = deck.isRepeat && deck.now?.path === file
+
+  if (!isRepeat && deck.queue[0]?.path === file) {
+    deck.now = deck.queue.shift()
+  } else if (!isRepeat) {
+    deck.now = deck.files.find(song => song.path === file) ?? deck.now
+  }
+  deck.planned = null
+  deck.source = 'files'
+  deck.state = 'playing'
+  renderDeck()
 }
 
 /** Spotify's web player, as a window of the person's browser. */
@@ -2666,18 +3661,229 @@ const fillFilter = (select, all, values) => {
   select.value = wanted.includes(picked) ? picked : ''
 }
 
-/** Works out which songs the search box and the two filters leave. */
+// ---- the song list's columns and order: the person's pick, kept on this computer.
+const SONG_COLS = [
+  ['number', '#', 'The song\'s number on its album'],
+  ['artist', 'Artist', ''],
+  ['album', 'Album', ''],
+  ['genre', 'Genre', ''],
+  ['folder', 'Folder', 'The folder the song sits in: an artist\'s or a collection\'s'],
+  ['length', 'Time', 'How long the song runs'],
+]
+const savedPick = (key, usual) => {
+  try {
+    return { ...usual, ...JSON.parse(localStorage.getItem(key) ?? '{}') }
+  } catch {
+    return usual
+  }
+}
+const songCols = savedPick('songCols', { number: false, artist: false, album: false, genre: true, folder: false, length: true })
+/** What the list is sorted by ('' for the order the songs were found in, or a playlist's own), and whether backwards. */
+const songSort = savedPick('songSort', { by: '', isDown: false })
+const songTime = seconds => (seconds > 0 ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}` : '')
+const SONG_VALUE = {
+  number: song => song.track ?? 0,
+  title: song => (songCols.artist ? song.title : song.name),
+  artist: song => song.artist,
+  album: song => song.album,
+  genre: song => song.genre,
+  folder: song => song.group,
+  length: song => song.length ?? 0,
+}
+
+/** The list in the order picked. Songs that tie stay together by album, then by number. */
+const sortSongs = songs => {
+  const value = SONG_VALUE[songSort.by]
+
+  if (!value) {
+    return songs
+  }
+
+  const text = (a, b) => String(a ?? '').localeCompare(String(b ?? ''), undefined, { numeric: true, sensitivity: 'base' })
+  // Songs with no album named count their folder as the album.
+  const album = (a, b) => text(a.album || a.folder, b.album || b.folder) || (a.track ?? 0) - (b.track ?? 0)
+
+  return [...songs].sort((a, b) => {
+    const [x, y] = [value(a), value(b)]
+    // By number is by album first: a number alone would shuffle the albums together.
+    const order = songSort.by === 'number' ? album(a, b) : typeof x === 'number' ? x - y : text(x, y)
+
+    return (songSort.isDown ? -order : order) || album(a, b)
+  })
+}
+
+// The order of the columns, left to right: the person's, changed by dragging a column's name onto another's.
+const SONG_ORDER = ['number', 'title', 'artist', 'album', 'genre', 'folder', 'length']
+const songOrder = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem('songOrder') ?? '[]')
+    const known = Array.isArray(saved) ? saved.filter((id, at) => SONG_ORDER.includes(id) && saved.indexOf(id) === at) : []
+
+    // A column this version added goes at the end.
+    return [...known, ...SONG_ORDER.filter(id => !known.includes(id))]
+  } catch {
+    return [...SONG_ORDER]
+  }
+})()
+/** The columns on show, in their order. The song's name is always one of them. */
+const shownCols = () => songOrder.filter(id => id === 'title' || songCols[id])
+const SONG_WIDTH = { number: '26px', title: 'minmax(0, 2.2fr)', length: '40px' }
+// A column the person sized keeps that width (in pixels) while there is room, and is never narrower than its least.
+const SONG_LEAST = { number: 24, length: 36 }
+const leastOf = id => SONG_LEAST[id] ?? 50
+const SONG_MOST = 600
+const songWidths = savedPick('songWidths', {})
+const songTemplate = () =>
+  [
+    ...shownCols().map(id => {
+      const width = Number(songWidths[id])
+
+      return width > 0 ? `minmax(${leastOf(id)}px, ${Math.min(SONG_MOST, Math.max(leastOf(id), width))}px)` : (SONG_WIDTH[id] ?? 'minmax(0, 1fr)')
+    }),
+    '18px',
+  ].join(' ')
+const putSongTemplate = () => $('library').style.setProperty('--song-cols', songTemplate())
+let movingCol = ''
+
+/** The columns as the rows lay them out, and the line of column names above the list. */
+const renderSongHead = () => {
+  putSongTemplate()
+  const name = id => {
+    const [, label, title] = id === 'title' ? ['', songCols.artist ? 'Title' : 'Song', ''] : SONG_COLS.find(one => one[0] === id)
+    const head = el('div', `col${id === 'number' ? ' num' : id === 'length' ? ' time' : ''}`, label + (songSort.by === id ? (songSort.isDown ? ' \u25be' : ' \u25b4') : ''))
+    head.setAttribute('role', 'button')
+    head.tabIndex = 0
+    head.draggable = true
+    head.classList.toggle('on', songSort.by === id)
+    head.title = `${title ? title + '. ' : ''}Click to sort by this; again for the other way round; a third time for the usual order. Drag it onto another column's name to move the column.`
+    const sort = () => {
+      Object.assign(songSort, songSort.by !== id ? { by: id, isDown: false } : songSort.isDown ? { by: '', isDown: false } : { by: id, isDown: true })
+      localStorage.setItem('songSort', JSON.stringify(songSort))
+      filterSongs()
+    }
+    head.addEventListener('click', sort)
+    head.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault()
+        sort()
+      }
+    })
+    head.addEventListener('dragstart', event => {
+      movingCol = id
+      event.dataTransfer.effectAllowed = 'move'
+      event.dataTransfer.setData('text/plain', label)
+    })
+    head.addEventListener('dragover', event => {
+      if (movingCol !== '' && movingCol !== id) {
+        event.preventDefault()
+        head.classList.add('drop')
+      }
+    })
+    head.addEventListener('dragleave', () => head.classList.remove('drop'))
+    head.addEventListener('dragend', () => {
+      movingCol = ''
+      head.classList.remove('drop')
+    })
+    head.addEventListener('drop', event => {
+      event.preventDefault()
+
+      if (movingCol === '' || movingCol === id) {
+        return
+      }
+
+      // The column takes the place of the one it was dropped on, which moves over towards where it came from.
+      const isRightwards = songOrder.indexOf(movingCol) < songOrder.indexOf(id)
+      songOrder.splice(songOrder.indexOf(movingCol), 1)
+      songOrder.splice(songOrder.indexOf(id) + (isRightwards ? 1 : 0), 0, movingCol)
+      movingCol = ''
+      localStorage.setItem('songOrder', JSON.stringify(songOrder))
+      deck.listKey = ''
+      renderDeck()
+    })
+
+    // The grip on the column's right edge: drag it to size the column, double click for the usual width.
+    const grip = el('i', 'grip')
+    grip.title = 'Drag to make this column wider or narrower. Double click for its usual width.'
+    grip.addEventListener('click', event => event.stopPropagation())
+    grip.addEventListener('dblclick', event => {
+      event.stopPropagation()
+      delete songWidths[id]
+      localStorage.setItem('songWidths', JSON.stringify(songWidths))
+      putSongTemplate()
+    })
+    grip.addEventListener('pointerdown', down => {
+      down.stopPropagation()
+      // While the grip is held the name is not a thing to drag elsewhere.
+      head.draggable = false
+      const start = head.getBoundingClientRect().width
+      grip.setPointerCapture?.(down.pointerId)
+      const move = event => {
+        songWidths[id] = Math.round(Math.min(SONG_MOST, Math.max(leastOf(id), start + event.clientX - down.clientX)))
+        putSongTemplate()
+      }
+      const up = () => {
+        grip.removeEventListener('pointermove', move)
+        head.draggable = true
+        localStorage.setItem('songWidths', JSON.stringify(songWidths))
+      }
+      grip.addEventListener('pointermove', move)
+      grip.addEventListener('pointerup', up, { once: true })
+      grip.addEventListener('pointercancel', up, { once: true })
+    })
+    head.append(grip)
+
+    return head
+  }
+  $('songHead').replaceChildren(...shownCols().map(name), el('span'))
+}
+
+/** The ticks behind "Columns": what each song's row shows. */
+const renderSongCols = () => {
+  $('songColsBox').replaceChildren(
+    ...SONG_COLS.map(([id, label, title]) => {
+      const pick = el('label')
+      const box = el('input')
+      box.type = 'checkbox'
+      box.checked = songCols[id] === true
+      box.addEventListener('change', () => {
+        songCols[id] = box.checked
+        localStorage.setItem('songCols', JSON.stringify(songCols))
+        deck.listKey = ''
+        renderDeck()
+      })
+      pick.title = title
+      pick.append(box, id === 'number' ? 'Number' : label)
+
+      return pick
+    }),
+  )
+}
+
+/** Works out which songs the search box and the filters leave, in the order picked. */
 const filterSongs = () => {
-  fillFilter($('songArtist'), 'All artists', deck.library.map(song => song.artist))
-  fillFilter($('songGenre'), 'All genres', deck.library.map(song => song.genre))
-  fillFilter($('songGroup'), 'All folders', deck.library.map(song => song.group))
+  const list = deck.playlists.find(one => one.file === deck.playlist)
+  deck.pool = list ? list.files : deck.library
+  fillFilter($('songArtist'), 'All artists', deck.pool.map(song => song.artist))
+  fillFilter($('songGenre'), 'All genres', deck.pool.map(song => song.genre))
+  fillFilter($('songAlbum'), 'All albums', deck.pool.map(song => song.album))
+  fillFilter($('songGroup'), 'All folders', deck.pool.map(song => song.group))
   const words = $('songSearch').value.trim().toLowerCase().split(/\s+/).filter(Boolean)
   const artist = $('songArtist').value
   const genre = $('songGenre').value
+  const album = $('songAlbum').value
   const group = $('songGroup').value
-  deck.files = deck.library.filter(
-    song => (!artist || song.artist === artist) && (!genre || song.genre === genre) && (!group || song.group === group) && words.every(word => songWords(song).includes(word)),
+  deck.files = sortSongs(
+    deck.pool.filter(
+      song =>
+        (!artist || song.artist === artist) &&
+        (!genre || song.genre === genre) &&
+        (!album || song.album === album) &&
+        (!group || song.group === group) &&
+        words.every(word => songWords(song).includes(word)),
+    ),
   )
+  // The song playing is the same song in the new list, so "next" goes on from it.
+  deck.now = deck.files.find(song => song.path === deck.now?.path) ?? deck.now
   deck.listKey = ''
   renderDeck()
 }
@@ -2686,8 +3892,22 @@ const setLibrary = scanned => {
   if (scanned) {
     deck.library = scanned.files
     deck.folders = scanned.folders
-    filterSongs()
+    deck.playlists = Array.isArray(scanned.playlists) ? scanned.playlists : []
+
+    // A playlist that was taken out is no longer the one on show.
+    if (!deck.playlists.some(one => one.file === deck.playlist)) {
+      showPlaylist('')
+    } else {
+      filterSongs()
+    }
   }
+}
+
+/** Puts one playlist's songs in the list, in the playlist's order; '' brings all the songs back. */
+const showPlaylist = file => {
+  deck.playlist = file
+  localStorage.setItem('songPlaylist', file)
+  filterSongs()
 }
 
 const songRow = (song, { onPlay, button, onButton, title }) => {
@@ -2698,8 +3918,17 @@ const songRow = (song, { onPlay, button, onButton, title }) => {
     event.stopPropagation()
     onButton()
   })
-  row.title = [song.name, song.album, song.genre].filter(Boolean).join(' \u00b7 ')
-  row.append(el('span', '', song.name), el('small', '', song.genre || song.album || song.group), side)
+  row.title = [song.name, song.album, song.genre, songTime(song.length)].filter(Boolean).join(' \u00b7 ')
+  const cell = {
+    number: () => el('small', 'num', song.track > 0 ? String(song.track) : ''),
+    title: () => el('span', '', songCols.artist ? song.title : song.name),
+    artist: () => el('small', '', song.artist),
+    album: () => el('small', '', song.album),
+    genre: () => el('small', '', song.genre),
+    folder: () => el('small', '', song.group),
+    length: () => el('small', 'time', songTime(song.length)),
+  }
+  row.append(...shownCols().map(id => cell[id]()), side)
   row.addEventListener('click', onPlay)
 
   return row
@@ -2763,6 +3992,7 @@ const renderDeck = () => {
   }
   $('playerBrowser').disabled = deck.browser === ''
   $('playerBrowser').textContent = deck.browser ? `Open in ${deck.browser}` : 'Open player'
+  $('spotifyWeb').textContent = `Open in ${deck.docks.find(name => name === deck.browser) ?? deck.docks.find(name => deck.browsers.includes(name)) ?? 'browser'}`
   $('playerNote').textContent =
     deck.playerSaid ||
     (deck.browser
@@ -2809,10 +4039,13 @@ const renderDeck = () => {
 
   if (deck.listKey !== key) {
     deck.listKey = key
+    renderSongHead()
+    const list = deck.playlists.find(one => one.file === deck.playlist)
+    $('songsTitle').textContent = list ? `Songs in ${list.name}` : 'Songs'
     const shown = deck.files.slice(0, 400)
     songs.replaceChildren(
-      ...(deck.library.length === 0
-        ? [el('div', 'empty', 'No music found. Add a folder below.')]
+      ...(deck.pool.length === 0
+        ? [el('div', 'empty', list ? (list.isMissing ? 'This playlist\'s file could not be read. It may have been moved.' : 'None of this playlist\'s songs are on this computer.') : 'No music found. Add a folder below.')]
         : shown.length === 0
           ? [el('div', 'empty', 'No song matches.')]
           : shown.map(one =>
@@ -2832,7 +4065,7 @@ const renderDeck = () => {
       songs.append(el('div', 'empty', `${count(deck.files.length - shown.length)} more: search to narrow the list.`))
     }
     $('songCount').textContent =
-      deck.files.length === deck.library.length ? `${count(deck.library.length)}` : `${count(deck.files.length)} of ${count(deck.library.length)}`
+      deck.files.length === deck.pool.length ? `${count(deck.pool.length)}` : `${count(deck.files.length)} of ${count(deck.pool.length)}`
   }
 
   ;[...songs.children].forEach((row, index) =>
@@ -2844,7 +4077,7 @@ const renderDeck = () => {
   $('queueClear').classList.toggle('hidden', deck.queue.length === 0)
   queue.replaceChildren(
     ...(deck.queue.length === 0
-      ? [el('div', 'empty', 'Nothing queued. Press + on a song, or import a playlist.')]
+      ? [el('div', 'empty', 'Nothing queued. Press + on a song.')]
       : deck.queue.map((one, index) =>
           songRow(one, {
             onPlay: () => {
@@ -2859,6 +4092,26 @@ const renderDeck = () => {
             },
           }),
         )),
+  )
+
+  // The playlists kept in the app: a click shows one's songs in the list, another brings all the songs back.
+  $('playlistsHead').classList.toggle('hidden', deck.playlists.length === 0)
+  $('playlists').replaceChildren(
+    ...deck.playlists.map(list => {
+      const row = el('div', 'music-folder list')
+      const drop = el('button', 'tiny', '\u00d7')
+      drop.title = 'Take this playlist out of Cla-Amp (its file and its songs stay where they are)'
+      drop.addEventListener('click', async event => {
+        event.stopPropagation()
+        setLibrary(await call('music:unlist', list.file))
+      })
+      row.classList.toggle('active', list.file === deck.playlist)
+      row.title = `${list.file}\nClick to show this playlist's songs in the list; click again for all the songs.`
+      row.addEventListener('click', () => showPlaylist(list.file === deck.playlist ? '' : list.file))
+      row.append(el('span', '', list.name), el('small', '', list.isMissing ? 'file not found' : count(list.files.length)), drop)
+
+      return row
+    }),
   )
 
   const folders = $('musicFolders')
@@ -2900,6 +4153,15 @@ const onDeck = status => {
   // While the equalizer's player has the song, its state stands in for the helper's.
   if (tuner.isOn) {
     status = { ...status, st: tuner.state, pos: tuner.pos, dur: tuner.dur, seq: Math.max(status.seq ?? 0, deck.lastSeq), ev: tuner.takeEnded() ? 'ended' : undefined }
+
+    // In a song's last stretch the one that follows is made ready, so it starts with no gap.
+    if (deck.source === 'files' && tuner.dur > 0 && tuner.dur - tuner.pos < 20) {
+      const next = plannedSong()
+
+      if (next) {
+        void tuner.ready(next.path)
+      }
+    }
   }
 
   const frame = status.sp?.[status.sp.length - 1]
@@ -3109,6 +4371,51 @@ const widgets = {
 }
 const isShown = name => widgets.shown.has(name)
 
+// Any panel of the side columns can be put away: right-click it, or untick it
+// under Widgets, where it is brought back. Kept by the panel's own name.
+const gonePanels = new Set(kept('hiddenPanels', []).filter(one => typeof one === 'string'))
+const panelName = panel => panel.querySelector('h3')?.firstChild?.textContent.replace(/^[^\p{L}]+/u, '').trim() || panel.dataset.panel
+const putGone = () => {
+  for (const panel of document.querySelectorAll('.cols .panel:not(.widget)')) {
+    panel.classList.toggle('gone', gonePanels.has(panel.dataset.panel))
+  }
+  localStorage.setItem('hiddenPanels', JSON.stringify([...gonePanels]))
+}
+
+/** A small menu at the mouse: each row a thing to do; `note` is a line of small print under them. */
+const popMenu = (event, rows, note = '') => {
+  event.preventDefault()
+  document.querySelector('.wg-menu.ctx')?.remove()
+  const box = el('div', 'wg-menu ctx')
+
+  for (const [label, run] of rows) {
+    const row = el('button', 'wg-pick', label)
+    row.type = 'button'
+    row.addEventListener('click', () => {
+      box.remove()
+      run()
+    })
+    box.append(row)
+  }
+
+  if (note) {
+    box.append(el('small', '', note))
+  }
+  document.body.append(box)
+  const size = box.getBoundingClientRect()
+  box.style.left = `${Math.max(4, Math.min(event.clientX, window.innerWidth - size.width - 4))}px`
+  box.style.top = `${Math.max(4, Math.min(event.clientY, window.innerHeight - size.height - 4))}px`
+  const shut = closing => {
+    if (closing.type === 'keydown' ? closing.key === 'Escape' : !box.contains(closing.target)) {
+      box.remove()
+      document.removeEventListener('pointerdown', shut, true)
+      document.removeEventListener('keydown', shut, true)
+    }
+  }
+  document.addEventListener('pointerdown', shut, true)
+  document.addEventListener('keydown', shut, true)
+}
+
 const showWidgets = () => {
   for (const [name] of WIDGETS) {
     document.querySelector(`[data-panel="wg-${name}"]`)?.classList.toggle('hidden', !isShown(name))
@@ -3160,6 +4467,8 @@ const renderZones = now => {
 const loadToday = async () => {
   widgets.todayAt = Date.now()
   widgets.today = isDemo ? null : await call('today:stats')
+  // Kept for the calendar's report of each day.
+  noteToday(widgets.today)
   renderWidgets()
 }
 
@@ -3167,6 +4476,8 @@ const loadToday = async () => {
 const renderWidgets = () => {
   const project = active()
   const now = new Date()
+  // The status bar's clock ticks with the widgets.
+  renderBarExtras()
 
   if (isShown('time')) {
     const state = project?.status === 'working' ? 'Working' : project?.status === 'attention' ? 'Needs you' : elsewhere(project) ? 'Working in another app' : 'Idle'
@@ -3178,24 +4489,22 @@ const renderWidgets = () => {
   }
 
   if (isShown('calendar')) {
-    // This month, weeks starting on Sunday, today marked. Drawn again only when the day changes.
-    const key = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`
+    // The month, weeks starting on Sunday, today marked. Drawn again only when the day
+    // changes; the calendar draws itself again after a change to a due date or a note.
+    const key = dayKey(now)
 
     if ($('wgCal').dataset.day !== key) {
       $('wgCal').dataset.day = key
-      $('wgMonth').textContent = `${MONTHS[now.getMonth()]} ${now.getFullYear()}`
-      const first = new Date(now.getFullYear(), now.getMonth(), 1).getDay()
-      const days = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
-      const cells = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map(name => el('i', '', name))
+      drawCalendar({ month: $('wgMonth'), grid: $('wgCal'), next: $('wgDue') }, now, {
+        // The chat in view, for a due date that belongs to a chat.
+        chatNow: () => {
+          const here = active()
 
-      for (let at = 0; at < first; at += 1) {
-        cells.push(el('span', '', ''))
-      }
-
-      for (let day = 1; day <= days; day += 1) {
-        cells.push(el('span', day === now.getDate() ? 'today' : '', String(day)))
-      }
-      $('wgCal').replaceChildren(...cells)
+          return here?.chatId ? { id: here.chatId, title: (allChats ?? []).find(one => one.id === here.chatId)?.title ?? here.name, cwd: here.cwd } : null
+        },
+        openChat: chat => void openSavedChat(chat),
+        quote,
+      })
     }
   }
 
@@ -3235,6 +4544,57 @@ setInterval(() => {
 /** Buttons and lists of the widgets, wired once the window is up. */
 const wireWidgets = () => {
   showWidgets()
+  putGone()
+
+  // Right-click a panel to put it away. Boxes to type in, and parts with a menu of their own, keep theirs.
+  for (const panel of document.querySelectorAll('.cols .panel')) {
+    panel.addEventListener('contextmenu', event => {
+      if (event.defaultPrevented || event.target.closest('input, textarea, select, canvas, a') || String(getSelection()).trim() !== '') {
+        return
+      }
+
+      const id = panel.dataset.panel
+      popMenu(
+        event,
+        [
+          [
+            `Hide ${panelName(panel)}`,
+            () => {
+              if (id.startsWith('wg-')) {
+                widgets.shown.delete(id.slice(3))
+                showWidgets()
+              } else {
+                gonePanels.add(id)
+                putGone()
+              }
+            },
+          ],
+        ],
+        'Bring it back with Widgets, at the top of the window.',
+      )
+    })
+  }
+
+  // The same for a part of the status bar.
+  for (const part of document.querySelectorAll('.statusbar .sb-item')) {
+    part.addEventListener('contextmenu', event => {
+      const label = STATUS_ITEMS.find(([id]) => id === part.dataset.sb)?.[1] ?? 'this'
+      popMenu(
+        event,
+        [
+          [
+            `Hide ${label} from the status bar`,
+            () => {
+              statusItems[part.dataset.sb] = false
+              localStorage.setItem('statusItems', JSON.stringify(statusItems))
+              putStatusItems()
+            },
+          ],
+        ],
+        'Bring it back with Widgets, at the top of the window.',
+      )
+    })
+  }
 
   for (const button of document.querySelectorAll('.wg-x[data-hide]')) {
     button.addEventListener('click', event => {
@@ -3262,6 +4622,23 @@ const wireWidgets = () => {
         return row
       }),
     )
+    // The other panels of the side columns: each ticked on or off the same way.
+    const others = el('div', 'wg-two')
+
+    for (const panel of document.querySelectorAll('.cols .panel:not(.widget)')) {
+      const row = el('label', 'wg-pick')
+      const tick = el('input')
+      tick.type = 'checkbox'
+      tick.checked = !gonePanels.has(panel.dataset.panel)
+      tick.addEventListener('change', () => {
+        gonePanels[tick.checked ? 'delete' : 'add'](panel.dataset.panel)
+        putGone()
+      })
+      row.append(tick, el('span', '', panelName(panel)))
+      others.append(row)
+    }
+    menu.prepend(el('div', 'wg-head', 'Widgets'))
+    menu.append(el('hr'), el('div', 'wg-head', 'Panels'), others)
     const second = el('label', 'wg-pick')
     const box = el('input')
     box.type = 'checkbox'
@@ -3281,11 +4658,94 @@ const wireWidgets = () => {
       savePanels()
     })
     second.append(box, el('span', '', 'A second column (drag panels into it)'))
-    menu.append(el('hr'), second)
+    const tall = el('label', 'wg-pick')
+    const tallBox = el('input')
+    tallBox.type = 'checkbox'
+    tallBox.checked = document.body.classList.contains('side-tall')
+    tallBox.addEventListener('change', () => {
+      document.body.classList.toggle('side-tall', tallBox.checked)
+      localStorage.setItem('sideTall', tallBox.checked ? '1' : '0')
+    })
+    tall.append(tallBox, el('span', '', 'Side columns run the whole height of the window'))
+    const linked = el('label', 'wg-pick')
+    const linkedBox = el('input')
+    linkedBox.type = 'checkbox'
+    linkedBox.checked = localStorage.getItem('sideLinked') === '1'
+    linkedBox.addEventListener('change', () => localStorage.setItem('sideLinked', linkedBox.checked ? '1' : '0'))
+    linked.title = 'Off: each side column has its own width, and the divider in front of each sizes it. On: dragging either divider sizes both alike.'
+    linked.append(linkedBox, el('span', '', 'Resize the two side columns together'))
+    const arrange = el('button', 'pill', 'Arrange the window...')
+    arrange.type = 'button'
+    arrange.title = 'Drag the logo, the top player, the buttons, the spectrum and the panels to other parts of the window'
+    arrange.addEventListener('click', () => {
+      menu.classList.add('hidden')
+      setArranging(true)
+    })
+    // What the status bar shows: each part ticked on or off.
+    const barPicks = el('div', 'wg-bar')
+
+    for (const [id, label] of STATUS_ITEMS) {
+      const pick = el('label', 'wg-pick')
+      const box = el('input')
+      box.type = 'checkbox'
+      box.checked = statusItems[id] === true
+      box.addEventListener('change', () => {
+        statusItems[id] = box.checked
+        localStorage.setItem('statusItems', JSON.stringify(statusItems))
+        putStatusItems()
+      })
+      pick.append(box, el('span', '', label))
+      barPicks.append(pick)
+    }
+    menu.append(el('hr'), second, tall, linked, el('hr'), el('div', 'wg-head', 'Status bar shows'), barPicks, el('hr'), el('div', 'wg-head', 'Layout'), arrange)
+
+    // Where the sections of the window sit. A theme keeps these too.
+    for (const [key, label, choices] of LAYOUT_CHOICES) {
+      const row = el('label', 'wg-layout')
+      const pick = el('select')
+      pick.append(...choices.map(([value, words]) => Object.assign(el('option', '', words), { value })))
+      pick.value = layout[key] ?? choices[0][0]
+      pick.addEventListener('change', () => {
+        layout[key] = pick.value
+        localStorage.setItem('layout', JSON.stringify(layout))
+        putLayout()
+      })
+      row.append(el('span', '', label), pick)
+      menu.append(row)
+    }
+
+    // The typeface of the window's text.
+    const fontRow = el('label', 'wg-layout')
+    const fontPick = el('select')
+    const group = (label, names) => {
+      const box = document.createElement('optgroup')
+      box.label = label
+      box.append(...names.map(name => Object.assign(el('option', '', name), { value: name })))
+
+      return box
+    }
+    const open = FONTS_OPEN.filter(hasFont)
+    fontPick.append(Object.assign(el('option', '', "The skin's own"), { value: '' }), group('Comes with Windows', FONTS_WINDOWS.filter(hasFont)))
+
+    if (open.length > 0) {
+      fontPick.append(group('Open source, installed here', open))
+    }
+    fontPick.value = layout.font ?? ''
+    fontPick.addEventListener('change', () => {
+      layout.font = fontPick.value
+      localStorage.setItem('layout', JSON.stringify(layout))
+      putLayout()
+    })
+    fontRow.append(el('span', '', 'Text'), fontPick)
+    menu.append(fontRow, el('div', 'wg-note', 'Free, open-source typefaces you install on this computer (Inter, Roboto, Noto Sans, JetBrains Mono, Atkinson Hyperlegible and others) show up in this list.'))
+    // It opens under its button, at the top of the window.
+    const at = $('wgChoose').getBoundingClientRect()
+    menu.style.top = `${Math.round(at.bottom + 4)}px`
+    menu.style.right = `${Math.max(8, Math.round(window.innerWidth - at.right))}px`
     menu.classList.toggle('hidden')
   })
   document.addEventListener('click', event => {
-    if (!event.target.closest('.wg-chooser')) {
+    if (!event.target.closest('#wgChoose, #wgMenu')) {
       menu.classList.add('hidden')
     }
   })
@@ -3418,15 +4878,112 @@ const signIn = async () => {
 
 // -------------------------------------------------------------------- actions
 
-const submit = text => {
-  const project = active()
-  const words = text.trim()
+/** Files waiting to go with the next message: full paths, as dropped, pasted or picked. */
+let attached = []
+const PICTURE_END = /\.(png|jpe?g|gif|webp)$/i
 
-  if (!project || words === '') {
+const renderAttached = () => {
+  const list = $('attachList')
+  list.classList.toggle('hidden', attached.length === 0)
+  list.replaceChildren(
+    ...attached.map(file => {
+      const chip = el('span', 'attach-chip')
+      const name = file.split(/[\\/]/).pop()
+      const off = el('button', '', '✕')
+      off.type = 'button'
+      off.title = 'Do not send this file'
+      off.addEventListener('click', () => {
+        attached = attached.filter(one => one !== file)
+        renderAttached()
+      })
+      chip.title = file
+
+      if (PICTURE_END.test(name)) {
+        const picture = el('img')
+        picture.src = encodeURI(`file:///${file.replace(/\\/g, '/')}`).replace(/#/g, '%23').replace(/\?/g, '%3F')
+        picture.alt = ''
+        picture.title = 'Click to open it in the picture viewer'
+        picture.addEventListener('click', () => viewPicture(picture.src, name))
+        picture.addEventListener('error', () => picture.remove())
+        chip.classList.add('has-picture')
+        chip.append(picture, el('span', '', name), off)
+      } else {
+        chip.append(el('i', '', '▤'), el('span', '', name), off)
+      }
+
+      return chip
+    }),
+  )
+}
+
+const attach = files => {
+  for (const file of files) {
+    if (typeof file === 'string' && file !== '' && !attached.includes(file)) {
+      attached.push(file)
+    }
+  }
+  renderAttached()
+}
+
+/** Files from a drop or a paste: those on disk by their path, a pasted picture saved first. */
+const attachFrom = async transfer => {
+  const found = []
+
+  for (const file of [...(transfer?.files ?? [])]) {
+    const where = window.amp.pathOf(file)
+
+    if (where) {
+      found.push(where)
+    } else if (/^image\/(png|jpeg|gif|webp)$/.test(file.type)) {
+      const data = await new Promise(resolve => {
+        const reader = new FileReader()
+        reader.addEventListener('load', () => resolve(reader.result))
+        reader.addEventListener('error', () => resolve(''))
+        reader.readAsDataURL(file)
+      })
+      found.push(await call('attach:paste', data))
+    }
+  }
+  attach(found)
+}
+
+/** Puts text into the message box as a quote, above whatever is being written. */
+const quote = text => {
+  const words = String(text ?? '').trim()
+
+  if (words === '') {
     return
   }
 
-  void call('project:send', project.id, words)
+  const input = $('input')
+  const lines = (words.length > 3000 ? words.slice(0, 3000) + '…' : words).split('\n').map(line => `> ${line}`).join('\n')
+  input.value = `${input.value.trimEnd()}${input.value.trim() ? '\n\n' : ''}${lines}\n\n`
+  input.dispatchEvent(new Event('input'))
+  input.focus()
+  input.setSelectionRange(input.value.length, input.value.length)
+  input.scrollTop = input.scrollHeight
+}
+
+/** The text marked with the mouse inside the chat, or ''. */
+const markedInChat = () => {
+  const marked = getSelection()
+
+  return marked && !marked.isCollapsed && marked.rangeCount > 0 && $('chat').contains(marked.getRangeAt(0).commonAncestorContainer) ? marked.toString().trim() : ''
+}
+
+const submit = (text, files = [], isNow = false) => {
+  // Sending a message goes to the end and follows the answer.
+  isFollowingChat = true
+  const project = active()
+  const words = text.trim()
+
+  if (!project || (words === '' && files.length === 0)) {
+    return false
+  }
+
+  void call('project:send', project.id, words, files, isNow)
+
+  return true
 }
 
 const renderAll = () => {
@@ -3448,12 +5005,88 @@ const queuePaint = () => {
 }
 
 const wire = () => {
+  // Any picture in the chat opens in the picture viewer, over the window, and not inside the chat.
+  $('chat').addEventListener('click', event => {
+    if (event.target instanceof HTMLImageElement && event.target.naturalWidth > 0) {
+      event.preventDefault()
+      viewPicture(event.target.src, event.target.alt)
+    }
+  })
   const input = $('input')
-  const send = () => {
-    submit(input.value)
-    input.value = ''
+  // The box grows with what is written, up to a little under half the window.
+  const fit = () => {
     input.style.height = 'auto'
+    input.style.height = `${Math.min(Math.max(160, Math.round(window.innerHeight * 0.45)), input.scrollHeight)}px`
   }
+  const send = (isNow = false) => {
+    if (!submit(input.value, attached, isNow)) {
+      return
+    }
+    input.value = ''
+    attached = []
+    renderAttached()
+    fit()
+    keepDraft()
+  }
+  // A message being written is kept when the window reloads or the app restarts.
+  window.addEventListener('pagehide', keepDraft)
+  $('attach').addEventListener('click', async () => attach((await call('attach:pick')) ?? []))
+  // A file dropped anywhere on the window goes with the next message.
+  const hasFiles = event => [...(event.dataTransfer?.types ?? [])].includes('Files')
+  let dropLeave = 0
+  window.addEventListener('dragover', event => {
+    if (hasFiles(event)) {
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'copy'
+      $('composer').classList.add('dropping')
+      clearTimeout(dropLeave)
+      dropLeave = setTimeout(() => $('composer').classList.remove('dropping'), 200)
+    }
+  })
+  window.addEventListener('drop', event => {
+    if (hasFiles(event)) {
+      event.preventDefault()
+      $('composer').classList.remove('dropping')
+      void attachFrom(event.dataTransfer)
+      input.focus()
+    }
+  })
+  input.addEventListener('paste', event => {
+    if ((event.clipboardData?.files?.length ?? 0) > 0) {
+      event.preventDefault()
+      void attachFrom(event.clipboardData)
+    }
+  })
+  // Marking text in the chat offers a Quote button beside it.
+  const quotePop = el('button', 'quote-pop hidden', '❝ Quote')
+  quotePop.type = 'button'
+  quotePop.title = 'Put the marked text in your message as a quote'
+  document.body.append(quotePop)
+  quotePop.addEventListener('mousedown', event => event.preventDefault())
+  quotePop.addEventListener('click', () => {
+    quote(markedInChat())
+    getSelection()?.removeAllRanges()
+    quotePop.classList.add('hidden')
+  })
+  $('chat').addEventListener('mouseup', () =>
+    setTimeout(() => {
+      const marked = markedInChat()
+      quotePop.classList.toggle('hidden', marked === '')
+
+      if (marked !== '') {
+        const box = getSelection().getRangeAt(0).getBoundingClientRect()
+        quotePop.style.left = `${Math.max(8, Math.min(window.innerWidth - 90, box.right - 40))}px`
+        quotePop.style.top = `${Math.max(8, box.top - 30)}px`
+      }
+    }, 0),
+  )
+  document.addEventListener('mousedown', event => {
+    if (event.target !== quotePop) {
+      quotePop.classList.add('hidden')
+    }
+  })
+  $('chat').addEventListener('scroll', () => quotePop.classList.add('hidden'), { passive: true })
+  window.addEventListener('resize', fit)
   $('composer').addEventListener('submit', event => {
     event.preventDefault()
     send()
@@ -3496,15 +5129,15 @@ const wire = () => {
 
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
-      send()
+      // Ctrl+Enter while Claude is working: the message does not wait its turn.
+      send(event.ctrlKey)
     }
   })
   input.addEventListener('blur', () => $('slashMenu').classList.add('hidden'))
   input.addEventListener('input', () => {
     slash.at = 0
     renderSlash()
-    input.style.height = 'auto'
-    input.style.height = `${Math.min(160, input.scrollHeight)}px`
+    fit()
   })
   $('signInButton').addEventListener('click', () => void signIn())
   // Picks a Winamp skin file, converts it, and puts it on. A problem is said in a box.
@@ -3528,7 +5161,7 @@ const wire = () => {
     if (opened?.error) {
       alert(opened.error)
     } else if (opened && opened.isAuto === false) {
-      alert(`claude.ai was opened in ${opened.browser}, as an ordinary window. Docking needs Edge or Brave.`)
+      alert(`claude.ai was opened in ${opened.browser}, as an ordinary window.`)
     }
   })
   $('settingsBtn').addEventListener('click', () => void openSettings(activeId, { look: () => openLook(), guides: () => void openGuides(), about: () => void openAbout() }))
@@ -3563,6 +5196,35 @@ const wire = () => {
     })
   })
   $('model').addEventListener('change', () => void setEngine('model', $('model').value))
+  // The same two picks from the status bar: a click on the model or the effort opens its choices.
+  const tick = isOn => (isOn ? '\u2713 ' : '\u2003 ')
+  $('sbModelBtn').addEventListener('click', event => {
+    const info = engine.info
+
+    if (!info) {
+      return
+    }
+
+    const now = (info.models.find(one => one.value === info.model) ?? info.models[0])?.value
+    popMenu(
+      event,
+      info.models.map(one => [tick(one.value === now) + (one.value === 'default' ? `Default (${one.description})` : one.name), () => void setEngine('model', one.value)]),
+    )
+  })
+  $('sbEffortBtn').addEventListener('click', event => {
+    const info = engine.info
+
+    if (!info) {
+      return
+    }
+
+    const efforts = (info.models.find(one => one.value === info.model) ?? info.models[0])?.efforts ?? []
+    popMenu(
+      event,
+      [null, ...efforts].map(level => [tick((info.effort ?? null) === level) + (level === null ? 'Auto' : EFFORT_NAMES[level]), () => void setEngine('effort', level)]),
+      efforts.length === 0 ? 'This model has no effort levels.' : '',
+    )
+  })
   $('fast').addEventListener('change', () => void setEngine('fast', $('fast').checked))
   $('pluginSearch').addEventListener('input', renderLinks)
   $('linksRefresh').addEventListener('click', () => {
@@ -3575,9 +5237,19 @@ const wire = () => {
 
     if (project) {
       const at = MODES.findIndex(one => one.id === (project.mode ?? 'default'))
-      project.mode = MODES[(at + 1) % MODES.length].id
-      void call('project:mode', project.id, project.mode)
+      const wanted = MODES[(at + 1) % MODES.length].id
+      project.mode = wanted
       renderStatus()
+      void call('project:mode', project.id, wanted).then(said => {
+        // Claude Code may refuse a mode (Auto is not offered everywhere): step on to the next one.
+        if (said?.error && project.mode === wanted) {
+          project.mode = MODES[(MODES.findIndex(one => one.id === wanted) + 1) % MODES.length].id
+          void call('project:mode', project.id, project.mode)
+          renderStatus()
+          project.items.push({ kind: 'note', text: `${MODES.find(one => one.id === wanted).label} mode could not be switched on here: ${said.error}` })
+          renderChat()
+        }
+      })
     }
   })
   $('newChat').addEventListener('click', async () => {
@@ -3585,11 +5257,29 @@ const wire = () => {
 
     // A new chat never removes the one that was open: that stays saved, in the Chats tab.
     // Only when Claude is in the middle of working is there something to ask about.
-    const isWorking = project?.status === 'working'
+    const isWorking = project?.status === 'working' || (project?.agents ?? 0) > 0
 
-    if (project && (!isWorking || confirm('Claude is still working in this chat. Starting a new chat stops that work. The chat itself stays saved in the Chats tab. Start a new chat?'))) {
+    // While Claude works here, the new chat opens beside it: one more entry for the same folder.
+    if (project && isWorking) {
+      const made = await call('project:another', project.id)
+
+      if (made) {
+        const other = projects.get(made.id) ?? addProject(made)
+        Object.assign(other, { items: [], current: null, usage: null, subs: [], hasSession: false, lastPrompt: '', isLoaded: true, chatId: null })
+        other.tools.clear()
+        other.asks.clear()
+        chatFor = null
+        void select(other.id)
+      }
+
+      return
+    }
+
+    if (project) {
       await call('project:new', project.id)
-      Object.assign(project, { items: [], current: null, usage: null, subs: [], hasSession: false, lastPrompt: '' })
+      keepDraft()
+      Object.assign(project, { items: [], current: null, usage: null, subs: [], hasSession: false, lastPrompt: '', chatId: null })
+      takeDraft()
       project.tools.clear()
       project.asks.clear()
       chatFor = null
@@ -3629,17 +5319,14 @@ const wire = () => {
         }
         picker.classList.add('hidden')
 
-        if (events) {
-          Object.assign(project, { items: [], current: null, usage: null, subs: [], hasSession: true, lastPrompt: '', isLoaded: true })
-          project.tools.clear()
-          project.asks.clear()
-
-          for (const event of events) {
-            apply(project, event, true)
-          }
+        // The chat may open in another entry for the same folder, when this one is working.
+        if (opened?.isOpen && projects.has(opened.project.id)) {
           chatFor = null
-          renderAll()
-          $('chat').scrollTop = $('chat').scrollHeight
+          void select(opened.project.id)
+        } else if (events) {
+          const target = projects.get(opened.project.id) ?? addProject(opened.project)
+          target.chatId = one.id
+          showConversation(target, events)
         }
       })
       list.append(row)
@@ -3703,6 +5390,12 @@ const wire = () => {
   // --- layout: column widths, hidden columns, panel order and folding
   const root = document.documentElement
 
+  const savedRight2 = localStorage.getItem('width-right2')
+
+  if (savedRight2) {
+    root.style.setProperty('--right2', `${savedRight2}px`)
+  }
+
   for (const side of ['left', 'right']) {
     const saved = localStorage.getItem(`width-${side}`)
 
@@ -3721,12 +5414,32 @@ const wire = () => {
       const side = splitter.dataset.side
       const column = $(side)
       const start = column.getBoundingClientRect().width
+      // The two side columns as one (Widgets): a drag on either divider sizes both alike.
+      const isPair = side !== 'left' && document.body.classList.contains('col2') && localStorage.getItem('sideLinked') === '1'
+      const put = (name, width) => {
+        root.style.setProperty(`--${name}`, `${width}px`)
+        localStorage.setItem(`width-${name}`, String(width))
+      }
+      // A column grows only into the room the chat can spare, and never past 900.
+      const room = Math.max(0, $('center').getBoundingClientRect().width - CHAT_LEAST)
+      const pairStart = isPair ? ($('right').getBoundingClientRect().width + $('right2').getBoundingClientRect().width) / 2 : start
+      const most = Math.max(pairStart, Math.min(900, pairStart + (isPair ? room / 2 : room)))
       splitter.setPointerCapture(down.pointerId)
       const move = event => {
-        const delta = (event.clientX - down.clientX) * (side === 'left' ? 1 : -1)
-        const width = Math.round(Math.min(560, Math.max(200, start + delta)))
-        root.style.setProperty(`--${side}`, `${width}px`)
-        localStorage.setItem(`width-${side}`, String(width))
+        // The column grows away from its divider, whichever side of it the layout puts it on.
+        const grows = column.getBoundingClientRect().left < splitter.getBoundingClientRect().left ? 1 : -1
+        const delta = (event.clientX - down.clientX) * grows
+
+        if (isPair) {
+          // The outer divider moves both columns, so each takes half of the way the mouse went.
+          const width = Math.round(Math.min(most, Math.max(200, pairStart + (side === 'right' ? delta / 2 : delta))))
+          put('right', width)
+          put('right2', width)
+
+          return
+        }
+
+        put(side, Math.round(Math.min(most, Math.max(200, start + delta))))
       }
       splitter.addEventListener('pointermove', move)
       splitter.addEventListener('pointerup', () => splitter.removeEventListener('pointermove', move), { once: true })
@@ -3741,6 +5454,9 @@ const wire = () => {
     localStorage.setItem('panels', JSON.stringify(panels.map(one => [one.dataset.panel, one.classList.contains('closed'), one.parentElement === right2 ? 1 : 0])))
   }
   document.body.classList.toggle('col2', localStorage.getItem('col2') === '1')
+  document.body.classList.toggle('side-tall', localStorage.getItem('sideTall') === '1')
+  // The title bar's height, for side columns that start right under it.
+  new ResizeObserver(() => document.body.style.setProperty('--title-h', `${document.querySelector('.titlebar').offsetHeight}px`)).observe(document.querySelector('.titlebar'))
 
   try {
     for (const [name, isClosed, column] of JSON.parse(localStorage.getItem('panels') ?? '[]')) {
@@ -3755,13 +5471,15 @@ const wire = () => {
     // A saved layout that no longer parses: keep the default order.
   }
 
+  // Blocks moved in Arrange mode go back where they were left.
+  putPlaces()
+
   if (localStorage.getItem('deckOnTop') !== '1') {
     localStorage.setItem('deckOnTop', '1')
     right.prepend(right.querySelector('[data-panel="deck"]'))
     savePanels()
   }
 
-  right.append(document.querySelector('.wg-chooser'))
   let dragged = null
 
   // A panel dropped on a column's empty room goes to its end.
@@ -3778,7 +5496,7 @@ const wire = () => {
 
       if (event.target === column && dragged) {
         event.preventDefault()
-        column === right ? document.querySelector('.wg-chooser').before(dragged) : column.append(dragged)
+        column.append(dragged)
         savePanels()
       }
     })
@@ -3910,6 +5628,13 @@ const wire = () => {
     const isOpen = $('workList').classList.toggle('hidden') === false
     $('agentsBtn').setAttribute('aria-expanded', String(isOpen))
     renderWorkList()
+
+    if (isOpen && !isDemo) {
+      void call('work:load').then(said => {
+        workLoads = said ?? {}
+        renderWorkList()
+      })
+    }
   })
   $('workList').addEventListener('click', event => event.stopPropagation())
   document.addEventListener('click', shutWorkList)
@@ -3926,6 +5651,13 @@ const wire = () => {
   void call('player:state').then(said => {
     deck.player = { count: Number(said?.count) || 0, hidden: said?.hidden === true }
     renderDeck()
+  })
+  $('pagesBtn').addEventListener('click', async () => {
+    const said = await call('pages:toggle')
+
+    if (said?.error) {
+      alert(said.error)
+    }
   })
   const openIn = (site, isQuiet = false) => {
     const browser = site === 'spotify' ? (deck.docks.find(name => name === deck.browser) ?? deck.docks.find(name => deck.browsers.includes(name)) ?? deck.browser) : deck.browser
@@ -4030,12 +5762,14 @@ const wire = () => {
     putSize()
   })
   putSize()
-  // The spectrum in the button row is drawn as wide as the room it has.
+  // The spectrum in the button row is drawn as wide, and as tall, as the room it has.
   new ResizeObserver(([entry]) => {
     const width = Math.max(60, Math.round(entry.contentRect.width))
+    const height = Math.max(20, Math.round(entry.contentRect.height))
 
-    if ($('brandEq').width !== width) {
+    if ($('brandEq').width !== width || $('brandEq').height !== height) {
       $('brandEq').width = width
+      $('brandEq').height = height
       isSpectrumStale = true
     }
   }).observe(document.querySelector('.top-eq'))
@@ -4081,6 +5815,9 @@ const wire = () => {
   $('songArtist').addEventListener('change', filterSongs)
   $('songGenre').addEventListener('change', filterSongs)
   $('songGroup').addEventListener('change', filterSongs)
+  $('songAlbum').addEventListener('change', filterSongs)
+  renderSongCols()
+  $('songColsBtn').addEventListener('click', () => $('songColsBox').classList.toggle('hidden'))
   $('queueClear').addEventListener('click', () => {
     deck.queue = []
     renderDeck()
@@ -4093,13 +5830,13 @@ const wire = () => {
       engine.said = list.error
       renderEngine()
     } else if (list) {
-      // A playlist's songs go to the end of Up next; with nothing playing, the first one starts.
-      deck.queue.push(...list.files)
+      // The playlist is kept, and its songs are put in the list; with nothing playing, the first one starts.
+      deck.playlist = list.picked ?? ''
+      localStorage.setItem('songPlaylist', deck.playlist)
+      setLibrary(list)
 
-      if (deck.state === 'stopped' && deck.source === 'files') {
-        stepSong(1)
-      } else {
-        renderDeck()
+      if (deck.state === 'stopped' && deck.source === 'files' && deck.playlist !== '' && deck.files.length > 0) {
+        playSong(deck.files[0])
       }
     }
   })
@@ -4294,15 +6031,17 @@ const toggleMic = async () => {
  * read again at once; changed page code or app code shows a chip in the
  * title bar, because reloading is the person's call.
  */
-const updates = { page: false, app: false }
+const updates = { page: false, app: false, isWaiting: false }
 
 const renderUpdate = () => {
   const chip = $('update')
   chip.classList.toggle('hidden', !updates.page && !updates.app)
-  chip.textContent = updates.app ? 'Restart to update' : 'Reload to update'
-  chip.title = updates.app
-    ? "Cla-Amp's own code changed. Click to close and reopen it. A chat that is working right now is stopped; nothing already said is lost."
-    : "Cla-Amp's window code changed. Click to reload the window. Chats keep running and your unsent message is kept."
+  chip.textContent = updates.isWaiting ? 'Restarts when work is done' : updates.app ? 'Restart to update' : 'Reload to update'
+  chip.title = updates.isWaiting
+    ? 'Cla-Amp restarts by itself once every chat here has finished. Click to change that.'
+    : updates.app
+      ? "Cla-Amp's own code changed. Click to close and reopen it. If a chat is working, you choose: wait for it to finish, or restart now and have it carry on afterwards."
+      : "Cla-Amp's window code changed. Click to reload the window. Chats keep running and your unsent message is kept."
 }
 
 const onUpdate = async ({ kind }) => {
@@ -4322,19 +6061,17 @@ const onUpdate = async ({ kind }) => {
     return
   }
 
-  if (kind === 'page' || kind === 'app') {
-    updates[kind] = true
+  if (kind === 'page' || kind === 'app' || kind === 'waiting') {
+    updates.isWaiting = kind === 'waiting'
+    updates[kind === 'waiting' ? 'app' : kind] = true
     renderUpdate()
   }
 }
 
 const takeUpdate = () => {
   if (updates.app) {
-    const isWorking = [...projects.values()].some(one => one.status === 'working')
-
-    if (!isWorking || confirm('A chat is working right now. Restarting stops it. Restart anyway?')) {
-      void call('app:restart')
-    }
+    // With work going on, the app asks: wait for it, or restart now and carry on.
+    void call('app:restart')
 
     return
   }
@@ -4457,12 +6194,43 @@ const start = async () => {
   $('themesBtn').addEventListener('click', () => void openThemes())
   $('aboutBtn').addEventListener('click', () => void openAbout())
   void loadPlugins()
-  setInterval(() => void loadUsage(), 5 * 60 * 1000)
+  // The plan is also used by other apps and chats, so the limits are read again every minute.
+  setInterval(() => void loadUsage(), 60 * 1000)
 
   for (const id of Array.isArray(loaded.prefs.pins) ? loaded.prefs.pins : []) {
     pins.add(id)
   }
   setLibrary(await call('music:scan'))
+
+  // The window is never narrower than its columns need: the side columns
+  // at their widths, and room for the chat between them.
+  let leastTimer = null
+  let leastSaid = 0
+  const tellLeast = () => {
+    clearTimeout(leastTimer)
+    leastTimer = setTimeout(() => {
+      const sides = ['left', 'right', 'right2'].reduce((sum, id) => sum + ($(id).offsetWidth > 0 ? $(id).offsetWidth + 10 : 0), 0)
+      const least = sides + CHAT_LEAST + 24
+
+      if (least !== leastSaid) {
+        leastSaid = least
+        void call('win:least', least)
+      }
+    }, 150)
+  }
+  const sized = new ResizeObserver(tellLeast)
+
+  for (const id of ['left', 'right', 'right2']) {
+    sized.observe($(id))
+  }
+  tellLeast()
+
+  // Claude in Chrome: one switch for the whole app, read when a chat starts.
+  $('useChrome').checked = loaded.prefs.useChrome === true
+  $('useChrome').addEventListener('change', () => {
+    void call('prefs:set', 'useChrome', $('useChrome').checked)
+    $('useChromeHint').textContent = $('useChrome').checked ? 'on from your next new chat, or after a restart' : 'off from your next new chat, or after a restart'
+  })
 
   if (typeof loaded.prefs.volume === 'number') {
     void deckCmd('vol', loaded.prefs.volume.toFixed(2))

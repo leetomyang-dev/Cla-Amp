@@ -16,6 +16,9 @@ const el = (tag, className = '', text = '') => {
 
 // What this window keeps of the layout, by the name it is kept under.
 const LAYOUT_KEYS = ['panels', 'widgets', 'playerSize', 'col2', 'zones']
+// Added later: where the sections sit, the columns' widths and which are hidden.
+// A theme saved before these existed says nothing about them and leaves them as they are.
+const LATER_KEYS = ['places', 'layout', 'sideTall', 'width-left', 'width-right', 'width-right2', 'sideLinked', 'statusItems', 'hiddenPanels', 'hide-left', 'hide-right', 'topPlayer']
 
 const dialog = el('dialog', 'sheet theme-sheet')
 document.body.append(dialog)
@@ -32,7 +35,7 @@ const kept = key => {
 const snapshot = async () => ({
   skin: document.getElementById('skin').value,
   look: (await call('look:get')) ?? {},
-  layout: Object.fromEntries(LAYOUT_KEYS.map(key => [key, kept(key)]).filter(([, value]) => value !== null)),
+  layout: Object.fromEntries([...LAYOUT_KEYS.map(key => [key, kept(key)]).filter(([, value]) => value !== null), ...LATER_KEYS.map(key => [key, localStorage.getItem(key) ?? ''])]),
 })
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 
@@ -43,6 +46,15 @@ const putOn = async (name, data) => {
       localStorage.setItem(key, typeof data.layout[key] === 'string' ? data.layout[key] : JSON.stringify(data.layout[key]))
     } else if (data.layout) {
       localStorage.removeItem(key)
+    }
+  }
+  for (const key of LATER_KEYS) {
+    const value = data.layout?.[key]
+
+    if (value === '') {
+      localStorage.removeItem(key)
+    } else if (typeof value === 'string') {
+      localStorage.setItem(key, value)
     }
   }
   await call('look:set', data.look ?? {})
@@ -108,7 +120,7 @@ const show = async () => {
     dialog.close()
     document.getElementById('lookBtn').click()
   })
-  tools.append(customize, el('span', 'sheet-note', 'Panels and widgets: drag their headings, or use Widgets... at the bottom of the right column.'))
+  tools.append(customize, el('span', 'sheet-note', 'Panels and widgets: drag their headings, or use Widgets, at the top of the window.'))
   nowBox.append(saveRow, tools)
 
   // ---- the list.
