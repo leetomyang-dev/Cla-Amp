@@ -194,8 +194,10 @@ const noteTask = (project, block) => {
   const input = block.input ?? {}
 
   if (block.name === 'TodoWrite' && Array.isArray(input.todos)) {
+    project.isDesktopPlan = false
     project.tasks = input.todos.map((one, index) => ({ id: String(index), content: String(one.content ?? ''), status: one.status }))
   } else if (block.name === 'TaskCreate') {
+    project.isDesktopPlan = false
     project.taskAsks.set(block.id, String(input.subject ?? 'Task'))
   } else if (block.name === 'TaskUpdate') {
     const task = project.tasks.find(one => one.id === String(input.taskId))
@@ -212,6 +214,7 @@ const noteTask = (project, block) => {
     const numbers = value => (Array.isArray(value) ? value : typeof value === 'string' ? JSON.parse(value) : []).map(Number)
 
     if (Array.isArray(listed)) {
+      project.isDesktopPlan = true
       project.tasks = listed.map((one, index) => ({ id: String(index + 1), content: String(one?.content ?? ''), status: ['pending', 'in_progress', 'completed'].includes(one?.status) ? one.status : 'pending' }))
     }
 
@@ -264,9 +267,12 @@ const dropLive = item => {
 const apply = (project, event, isReplay = false) => {
   switch (event.t) {
     case 'user':
-      // A finished task list leaves with the next message.
-      if (project.tasks.every(task => task.status === 'completed')) {
+      // A finished task list leaves with the next message. So does a list the
+      // desktop app's chat left open: it gives every new message a list of its
+      // own, and a copy of its chat run here has no tool to finish the old one.
+      if (project.tasks.every(task => task.status === 'completed') || project.isDesktopPlan) {
         project.tasks = []
+        project.isDesktopPlan = false
       }
       project.current = null
       project.suggestion = ''
