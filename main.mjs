@@ -600,13 +600,16 @@ const readAgent = (projectId, toolId) => {
       try {
         const meta = JSON.parse(fs.readFileSync(path.join(folder, name), 'utf8'))
 
-        if (meta.toolUseId !== toolId) {
+        // By the tool call that started it, or by the agent's own id (its file's
+        // name): an agent that was resumed comes back under a new tool call.
+        if (meta.toolUseId !== toolId && name !== `agent-${toolId}.meta.json`) {
           continue
         }
 
         const file = path.join(folder, name.replace(/\.meta\.json$/, '.jsonl'))
         // A very long one: its last part.
-        const bytes = readTail(file, 6 * 1024 * 1024)
+        const most = 6 * 1024 * 1024
+        const bytes = readTail(file, most)
         const messages = []
 
         for (const line of bytes.toString('utf8').split('\n')) {
@@ -625,9 +628,13 @@ const readAgent = (projectId, toolId) => {
         return {
           name: String(meta.description ?? 'Agent').slice(0, 200),
           kind: String(meta.agentType ?? 'agent').slice(0, 80),
-          model: String(meta.model ?? '').slice(0, 80),
+          model: String(meta.model ?? meta.pickedEffortModel ?? '').slice(0, 80),
           isDone: meta.finished === true,
-          isCut: size > most,
+          isCut: bytes.length >= most,
+          // How it is going: when it began and last wrote, and how many tool calls it has made.
+          started: Date.parse(messages[0]?.timestamp ?? '') || 0,
+          last: Date.parse(messages.at(-1)?.timestamp ?? '') || 0,
+          tools: messages.reduce((sum, one) => sum + (one.type === 'assistant' && Array.isArray(one.message?.content) ? one.message.content.filter(block => block?.type === 'tool_use').length : 0), 0),
           events: toEvents(projectId, messages.slice(-800), Date.now()),
         }
       } catch {
@@ -971,12 +978,14 @@ class Session {
           name: String(message.description || (isAgent ? 'Agent' : 'Background work')).slice(0, 120),
           kind: isAgent ? String(message.subagent_type ?? 'agent').slice(0, 60) : taskKind(message.task_type),
           isAgent,
+          // The engine's own id for it; an agent's saved conversation is filed under this.
+          key: String(message.task_id),
           isBackground: message.is_backgrounded === true,
         }
         this.tasks.set(message.task_id, task)
 
         if (task.isBackground) {
-          this.emit({ t: 'agent-bg', id: task.id, name: task.name, kind: task.kind, isTask: !task.isAgent })
+          this.emit({ t: 'agent-bg', id: task.id, name: task.name, kind: task.kind, isTask: !task.isAgent, key: task.key })
           this.setStatus(this.status)
         }
       }
@@ -989,7 +998,7 @@ class Session {
 
       if (task && !task.isBackground && message.patch?.is_backgrounded === true) {
         task.isBackground = true
-        this.emit({ t: 'agent-bg', id: task.id, name: task.name, kind: task.kind, isTask: !task.isAgent })
+        this.emit({ t: 'agent-bg', id: task.id, name: task.name, kind: task.kind, isTask: !task.isAgent, key: task.key })
         this.setStatus(this.status)
       }
 

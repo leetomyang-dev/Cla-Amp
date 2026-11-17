@@ -399,10 +399,10 @@ const apply = (project, event, isReplay = false) => {
       const sub = project.subs.find(one => one.id === event.id)
 
       if (sub) {
-        Object.assign(sub, { isBackground: true, status: 'working' })
+        Object.assign(sub, { isBackground: true, status: 'working', key: event.key ?? sub.key })
       } else {
         // isTask: a background command, workflow or monitor rather than an agent.
-        project.subs.push({ id: event.id, name: event.name || 'Agent', kind: event.kind || 'agent', status: 'working', isBackground: true, isTask: event.isTask === true })
+        project.subs.push({ id: event.id, name: event.name || 'Agent', kind: event.kind || 'agent', status: 'working', isBackground: true, isTask: event.isTask === true, key: event.key })
       }
       // Finished agents make room first, so a working one is never dropped from the list.
       project.subs = [...project.subs.filter(one => one.status !== 'working').slice(-4), ...project.subs.filter(one => one.status === 'working')]
@@ -2874,6 +2874,20 @@ let agentTimer = 0
  * given, its thinking, each tool call and what came back, and its report.
  * While the agent works the page follows it.
  */
+/** A length of time in a few words: 40 s, 12 min, 1 h 5 min. */
+const howLong = ms => {
+  const seconds = Math.max(0, Math.round(ms / 1000))
+
+  return seconds < 60 ? `${seconds} s` : seconds < 3600 ? `${Math.round(seconds / 60)} min` : `${Math.floor(seconds / 3600)} h ${Math.round((seconds % 3600) / 60)} min`
+}
+
+/** What an agent did: looked up by the tool call that started it, then by the agent's own id (a resumed agent has a new tool call). */
+const readAgentOf = async (project, sub) => {
+  const got = await call('agent:read', project.id, sub.id)
+
+  return got?.error && sub.key ? call('agent:read', project.id, sub.key) : got
+}
+
 const openAgent = async (project, sub) => {
   if (agentSheet === null) {
     agentSheet = el('dialog', 'sheet file-sheet agent-sheet')
@@ -2910,6 +2924,10 @@ const openAgent = async (project, sub) => {
       ? {
           kind: sub.kind,
           isDone: sub.status !== 'working',
+          model: 'claude-opus-5-5',
+          started: Date.now() - 754000,
+          last: Date.now() - 8000,
+          tools: 1,
           events: [
             { t: 'user', text: 'Check the contrast of the status badges in both themes and report any that are hard to read.' },
             { t: 'assistant', isMain: true, blocks: [{ type: 'thinking', text: 'Find the badge colours first, then compare each with its background.' }, { type: 'tool_use', id: 'a1', name: 'Grep', input: { pattern: 'badge', path: 'src' } }] },
@@ -2917,7 +2935,7 @@ const openAgent = async (project, sub) => {
             { t: 'assistant', isMain: true, blocks: [{ type: 'text', text: 'All four badges pass in the dark theme. In the light theme the amber one is hard to read.' }] },
           ],
         }
-      : await call('agent:read', project.id, sub.id)
+      : await readAgentOf(project, sub)
 
     if (!agentSheet.open || !body.isConnected) {
       return
@@ -2929,7 +2947,19 @@ const openAgent = async (project, sub) => {
       return
     }
 
-    state.textContent = [got.kind, got.model, got.isDone ? 'finished' : 'working', got.isCut ? 'its last part' : ''].filter(Boolean).join('  \u00b7  ')
+    const spent = got.started > 0 && got.last >= got.started ? howLong((got.isDone || sub.status !== 'working' ? got.last : Date.now()) - got.started) : ''
+    const quiet = got.last > 0 && !got.isDone && sub.status === 'working' ? `last activity ${howLong(Date.now() - got.last)} ago` : ''
+    state.textContent = [
+      got.kind,
+      got.model,
+      got.isDone || sub.status !== 'working' ? 'finished' : 'working',
+      got.tools > 0 ? `${got.tools} ${got.tools === 1 ? 'tool call' : 'tool calls'}` : '',
+      spent ? `${spent}${got.isCut ? ' shown' : ''}` : '',
+      quiet,
+      got.isCut ? 'its last part' : '',
+    ]
+      .filter(Boolean)
+      .join('  \u00b7  ')
 
     // Nothing new since the last look: the page, and what is folded open in it, stay as they are.
     if (got.events.length === drawn) {

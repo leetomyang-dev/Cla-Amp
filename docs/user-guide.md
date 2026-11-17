@@ -261,7 +261,10 @@ working or finished.
 
 - **Click an agent** to see what it did, as a chat of its own: the task
   it was given, its thinking, each command and file it touched, and its
-  report. While the agent is still working, the page follows it.
+  report. While the agent is still working, the page follows it. The
+  line under its name says how it is going: its kind and model, whether
+  it is working, how many tool calls it has made, how long it has been
+  at it, and how long ago it last did something.
 - **Take a finished agent off the list** with the cross on its row, or
   right-click it. **Clear finished agents** removes all of them at once.
   This only tidies the list: what they did stays saved in the chat, and
