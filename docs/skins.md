@@ -130,7 +130,8 @@ folder is written `url('my-logo.png')`.
 ## skin.css: beyond the variables
 
 The stylesheet is ordinary CSS loaded after the app's own, so any rule you
-write wins over the app's rule for the same thing. Useful hooks:
+write wins over the app's rule for the same thing, with one exception: the
+basic buttons keep their places (see Limits). Useful hooks:
 
 | Selector | Part |
 | --- | --- |
@@ -188,6 +189,15 @@ looked for in the skin's own folder.
   not load. Put pictures and font files in the skin folder, with simple names
   (letters, numbers, spaces, dashes, dots).
 - A stylesheet over 2 MB is ignored.
+- The basic buttons keep their places. The buttons of the title bar, the
+  button row and the message box sit where they sit in every skin, so
+  people find them without looking. Colour them, round them, give them
+  pictures, shadows and your own typeface; their size, order, gaps and
+  margins are the app's, and a skin's rules for those are not followed. A
+  typeface wider than the standard one is drawn a little smaller on those
+  buttons so the words still fit. A skin cannot hide a basic button or add
+  one. Where things go is the person's to change, with **Widgets** and
+  **Arrange the window**.
 - The equalizer and spectrum are drawn by code; a skin changes their colours
   through `--led`, `--amber`, `--red`, `--led-off`, `--text` and `--dim`, not
   their shape.

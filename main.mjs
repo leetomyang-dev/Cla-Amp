@@ -9,7 +9,7 @@ import readline from 'node:readline'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { archiveSession, deleteSession, forkSession, getSessionInfo, getSessionMessages, listSessions, query } from '@anthropic-ai/claude-agent-sdk'
-import { BrowserWindow, Menu, Tray, app, clipboard, dialog, ipcMain, screen, session as webSession, shell } from 'electron'
+import { BrowserWindow, Menu, Tray, app, clipboard, dialog, ipcMain, powerSaveBlocker, screen, session as webSession, shell } from 'electron'
 
 import { describeSong, readCover, readPlaylist, scanFolders } from './music-library.mjs'
 import { chatsFolder, countOutside, listOutside } from './outside-work.mjs'
@@ -521,6 +521,107 @@ const toEvents = (projectId, messages, ts) => {
   }
 
   return events
+}
+
+// "Stay awake": while it is on, Windows does not put the computer to sleep
+// by itself, so long work is not cut off. The screen may still turn off, and
+// closing a laptop's lid or choosing Sleep still sleeps. It ends with the app.
+let awakeId = null
+
+const setAwake = isOn => {
+  if (isOn && awakeId === null) {
+    awakeId = powerSaveBlocker.start('prevent-app-suspension')
+  } else if (!isOn && awakeId !== null) {
+    powerSaveBlocker.stop(awakeId)
+    awakeId = null
+  }
+
+  return awakeId !== null
+}
+
+/**
+ * What one agent of a chat did, as the events a chat is drawn from. Claude
+ * Code saves each agent's own conversation beside the chat's
+ * (<chat>/subagents/agent-*.jsonl, with a .meta.json naming the tool call
+ * that started it). Read only, and only for a project in this app's list.
+ */
+const readAgent = (projectId, toolId) => {
+  const project = state.projects.find(one => one.id === projectId)
+
+  if (!project || typeof toolId !== 'string' || !/^[\w-]{1,100}$/.test(toolId)) {
+    return { error: 'That agent was not found.' }
+  }
+
+  const home = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(app.getPath('home'), '.claude'), 'projects')
+  const folders = []
+
+  try {
+    // The chat's own folder first, then the other chats of the same project folder (a chat carried on under a new id).
+    const mine = path.join(home, project.cwd.replace(/[^A-Za-z0-9]/g, '-'))
+    const chats = fs.readdirSync(mine, { withFileTypes: true }).filter(one => one.isDirectory()).map(one => one.name)
+
+    for (const chat of [...chats.filter(one => one === project.sessionId), ...chats.filter(one => one !== project.sessionId).slice(-200)]) {
+      folders.push(path.join(mine, chat, 'subagents'))
+    }
+  } catch {
+    // No saved chats for this folder.
+  }
+
+  for (const folder of folders) {
+    let names = []
+
+    try {
+      names = fs.readdirSync(folder).filter(one => /^agent-[\w-]+\.meta\.json$/.test(one))
+    } catch {
+      continue
+    }
+
+    for (const name of names) {
+      try {
+        const meta = JSON.parse(fs.readFileSync(path.join(folder, name), 'utf8'))
+
+        if (meta.toolUseId !== toolId) {
+          continue
+        }
+
+        const file = path.join(folder, name.replace(/\.meta\.json$/, '.jsonl'))
+        const size = fs.statSync(file).size
+        // A very long one: its last part.
+        const most = 6 * 1024 * 1024
+        const handle = fs.openSync(file, 'r')
+        const bytes = Buffer.alloc(Math.min(size, most))
+        fs.readSync(handle, bytes, 0, bytes.length, Math.max(0, size - most))
+        fs.closeSync(handle)
+        const messages = []
+
+        for (const line of bytes.toString('utf8').split('\n')) {
+          try {
+            const one = JSON.parse(line)
+
+            if ((one.type === 'user' || one.type === 'assistant') && one.isMeta !== true) {
+              // In its own conversation the agent is the one speaking.
+              messages.push({ ...one, parent_tool_use_id: null })
+            }
+          } catch {
+            // A cut first line, or one still being written.
+          }
+        }
+
+        return {
+          name: String(meta.description ?? 'Agent').slice(0, 200),
+          kind: String(meta.agentType ?? 'agent').slice(0, 80),
+          model: String(meta.model ?? '').slice(0, 80),
+          isDone: meta.finished === true,
+          isCut: size > most,
+          events: toEvents(projectId, messages.slice(-800), Date.now()),
+        }
+      } catch {
+        // An unreadable one is passed over.
+      }
+    }
+  }
+
+  return { error: 'What this agent did is not saved on this computer.' }
 }
 
 /** One project's Claude Code session: its process, its queue of prompts, its permission asks. */
@@ -3094,6 +3195,15 @@ const handlers = {
     state.projects = state.projects.filter(one => one.id !== id)
     saveState()
   },
+  // Stay awake, on or off; kept for the next start.
+  'awake:set': isOn => {
+    state.prefs.keepAwake = isOn === true
+    saveState()
+
+    return setAwake(isOn === true)
+  },
+  // What an agent of a chat did, from Claude Code's own saved file. Read only.
+  'agent:read': (id, toolId) => readAgent(id, toolId),
   'project:transcript': id => (state.projects.some(one => one.id === id) ? readTranscript(id) : []),
   'project:send': (id, text, files, isNow) => sessionOf(id)?.submit(String(text), cleanFiles(files), isNow === true),
   // "Attach": the person picks files; only their paths come back.
@@ -4586,6 +4696,7 @@ void app.whenReady().then(() => {
   watchForUpdates()
 
   if (!IS_DEMO) {
+    setAwake(state.prefs.keepAwake === true)
     startDeck()
     // Takes back a player left open over a restart.
     win.once('ready-to-show', startPlayerHelper)

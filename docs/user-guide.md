@@ -240,6 +240,29 @@ To get a newer version later, close Cla-Amp and double-click **Update.bat** in t
 - Tick **A second column** in the Widgets menu to get another column, then
   drag panels into it.
 
+## Stay awake
+
+**Stay awake**, in the title bar, keeps the computer from going to sleep
+by itself while it is on, so long work is not cut off when you step away.
+It lights up and reads **Staying awake**. The screen may still turn off.
+Closing a laptop's lid, or choosing Sleep yourself, still sleeps, and on
+battery it will use power until you switch it off. The choice is kept for
+the next start and ends when Cla-Amp closes.
+
+## Agents
+
+When Claude hands part of the work to an agent, the agent shows under its
+project in the **Projects** tab, with a badge saying whether it is
+working or finished.
+
+- **Click an agent** to see what it did, as a chat of its own: the task
+  it was given, its thinking, each command and file it touched, and its
+  report. While the agent is still working, the page follows it.
+- **Take a finished agent off the list** with the cross on its row, or
+  right-click it. **Clear finished agents** removes all of them at once.
+  This only tidies the list: what they did stays saved in the chat, and
+  an agent that is still working cannot be removed here.
+
 ## Picking up where you left off
 
 Close Cla-Amp and open it again, and it comes back as you left it: the
@@ -248,6 +271,16 @@ and chat that were open, the tab on the left, where you were reading in
 each chat, and any message you had typed but not sent. A chat you were
 following to its end opens at its end. If the screen the window was on is
 gone, it opens on the one you have.
+
+## Buttons stay where they are
+
+Whatever skin or theme is on, the buttons of the title bar, the button
+row and the message box sit in the same places and have the same size:
+a skin changes how they look, not where they are. What moves them is
+your own choice: the language, **Size**, **Widgets**, and **Arrange the
+window**. Under **Widgets**, **Buttons** picks the button row's kind:
+**Small**, a picture beside the words, or **Big**, the picture above the words, which also adds
+Theme, Settings and Help. It stays as you set it in every skin.
 
 ## Easier to see, hear and reach
 

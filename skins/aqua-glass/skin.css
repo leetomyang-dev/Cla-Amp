@@ -86,10 +86,11 @@
 ::-webkit-scrollbar-track { background: rgba(2, 20, 46, 0.35); border-radius: 6px; }
 ::-webkit-scrollbar-thumb { background: linear-gradient(90deg, rgba(190, 232, 255, 0.75), rgba(70, 160, 235, 0.75)); border-radius: 6px; }
 
-/* The picture toolbar and the Widgets panel are part of this look, and so is
-   real glass: where Windows offers it, the desktop behind the window shows
-   through, blurred. Without it the water-blue backdrop above is used. */
-:root { --toolbar: on; --window-glass: acrylic; }
+/* Real glass is part of this look: where Windows offers it, the desktop
+   behind the window shows through, blurred. Without it the water-blue
+   backdrop above is used. The big picture buttons (Widgets, Buttons) get
+   their own shine here when the person switches them on. */
+:root { --window-glass: acrylic; }
 body.glass #app {
   background:
     radial-gradient(circle at 6% 22%, rgba(255, 255, 255, 0.5) 0 2px, rgba(170, 225, 255, 0.16) 3px 22px, rgba(255, 255, 255, 0.3) 23px 24px, transparent 25px),
@@ -132,21 +133,16 @@ body.glass #app {
     linear-gradient(180deg, rgba(120, 185, 245, 0.3), rgba(70, 140, 215, 0.22) 120px, rgba(60, 125, 200, 0.24));
 }
 body.glass .titlebar {
-  height: 28px;
-  padding: 0 7px 0 10px;
-  align-items: flex-start;
   background: none;
   border-bottom: 0;
   border-radius: 7px 7px 0 0;
   color: #0a0a0a;
   text-shadow: 0 0 9px #ffffff, 0 0 9px #ffffff, 0 0 5px #ffffff, 0 0 3px #ffffff;
 }
-body.glass .titlebar > * { margin-top: 5px; }
 body.glass .titlebar-name { font-weight: 400; font-size: 13px; letter-spacing: 0; }
 
 /* The tool buttons of the title bar: small clear glass tiles. */
 body.glass .chrome-btn {
-  height: 19px;
   color: #ffffff;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.5) 0%, rgba(255, 255, 255, 0.2) 48%, rgba(0, 20, 50, 0.22) 52%, rgba(255, 255, 255, 0.12) 100%);
   border: 1px solid rgba(20, 40, 70, 0.7);
@@ -154,21 +150,13 @@ body.glass .chrome-btn {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45);
   text-shadow: 0 0 3px rgba(0, 10, 30, 1), 0 1px 1px rgba(0, 10, 30, 1);
 }
-body.glass .titlebar select { height: 19px; margin-top: 5px; background: #0b3769; border-color: rgba(20, 40, 70, 0.8); text-shadow: none; }
+body.glass .titlebar select { background: #0b3769; border-color: rgba(20, 40, 70, 0.8); text-shadow: none; }
 
-/* Minimize, maximize and close: one joined strip hanging from the top edge. */
+/* Minimize, maximize and close: glass tiles, in the places they have in every skin. */
 body.glass .chrome-btn[data-win] {
-  margin: 0 0 0 -1px;
-  height: 20px;
-  width: 28px;
-  border-top: 0;
-  border-radius: 0;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.62) 0%, rgba(210, 222, 236, 0.4) 47%, rgba(70, 90, 115, 0.45) 50%, rgba(150, 175, 200, 0.4) 100%);
 }
-body.glass .chrome-btn[data-win='minimize'] { margin-left: 8px; border-radius: 0 0 0 5px; }
 body.glass .chrome-btn.close {
-  width: 46px;
-  border-radius: 0 0 5px 0;
   background: linear-gradient(180deg, #f3b6a8 0%, #d9634d 45%, #b8200b 50%, #cf4a2c 82%, #e9905f 100%);
 }
 body.glass .chrome-btn[data-win]:hover { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.6), 0 0 9px 2px rgba(120, 200, 255, 0.95); filter: none; }
@@ -236,18 +224,7 @@ body.glass .brand {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
-/* The title bar's own tools are one joined strip hanging from the top edge,
-   next to the strip of window buttons. */
-body.glass .titlebar select,
-body.glass .titlebar .chrome-btn:not([data-win]) {
-  margin: 0 0 0 -9px;
-  height: 21px;
-  border-top: 0;
-  border-radius: 0;
-}
-body.glass .titlebar select { margin-left: 0; border-radius: 0 0 0 5px; border: 1px solid rgba(20, 40, 70, 0.7); border-top: 0; }
-body.glass .titlebar #toggleRight { border-radius: 0 0 5px 0; }
-body.glass .chrome-btn[data-win='minimize'] { margin-left: 0; }
+body.glass .titlebar select { border: 1px solid rgba(20, 40, 70, 0.7); border-radius: 4px; }
 body.glass .titlebar select { color: #ffffff; background: #1d5f9c; }
 
 /* Clear glass has no blur, so the pane carries a light blue tint of its own,

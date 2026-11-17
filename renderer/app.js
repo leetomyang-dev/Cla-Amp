@@ -12,6 +12,7 @@ import { buildEqualizer, tuner } from './equalizer.js'
 import { openGuides } from './guides.js'
 import { LANGS, langChoice, setLang } from './lang.js'
 import { openLook, startLook } from './look.js'
+import { isBig, setBig } from './places.js'
 import { openThemes } from './themes.js'
 import { openSettings } from './settings.js'
 import { drawStyle, isEffectOn, nextSpectrumStyle, openSpectrumMenu, setCoverColours, setSkinLines, spectrumStyle } from './spectrum.js'
@@ -2657,12 +2658,48 @@ Nothing is deleted: its chats stay saved (find them again with Open chat, the Co
     asKey(row)
     list.append(row)
 
-    for (const sub of project.subs) {
-      const child = el('div', 'proj sub')
+    const shown = project.subs.filter(one => !agentsGone.has(one.id))
+
+    for (const sub of shown) {
+      const child = asKey(el('div', 'proj sub'))
       const words = el('div', 'proj-text')
+      const isOver = sub.status !== 'working'
+      const drop = () => {
+        agentsGone.add(sub.id)
+        keepAgentsGone()
+        renderProjects()
+      }
       words.append(el('div', 'proj-name', sub.name), el('div', 'proj-detail', sub.kind))
       child.append(el('div', 'proj-ico agent'), words, el('span', `badge ${sub.status}`, BADGES[sub.status]))
+      child.title = `${sub.name}\nClick to see what this agent did.`
+      child.addEventListener('click', () => void openAgent(project, sub))
+      child.addEventListener('contextmenu', event =>
+        popMenu(event, [
+          ['See what it did', () => void openAgent(project, sub)],
+          ...(isOver ? [['Take it off the list', drop]] : []),
+          ['Clear finished agents', clearAgents],
+        ]),
+      )
+
+      if (isOver) {
+        const shut = el('button', 'proj-x', '\u00d7')
+        shut.type = 'button'
+        shut.title = 'Take this finished agent off the list'
+        shut.addEventListener('click', event => {
+          event.stopPropagation()
+          drop()
+        })
+        child.append(shut)
+      }
       list.append(child)
+    }
+
+    if (shown.filter(one => one.status !== 'working').length > 1) {
+      const clear = el('button', 'sub-clear', 'Clear finished agents')
+      clear.type = 'button'
+      clear.title = 'Take every finished agent off the list. What they did stays saved in the chat.'
+      clear.addEventListener('click', clearAgents)
+      list.append(clear)
     }
   }
 
@@ -2718,6 +2755,134 @@ const ago = ts => {
 }
 
 /** Shows a saved conversation in a project's chat, in place of what was there. */
+// ---- agents: what one did, and tidying the list ----
+
+// Finished agents the person took off the list, by the tool call that started them.
+const agentsGone = (() => {
+  try {
+    return new Set(JSON.parse(localStorage.getItem('agentsGone') ?? '[]').filter(one => typeof one === 'string'))
+  } catch {
+    return new Set()
+  }
+})()
+const keepAgentsGone = () => localStorage.setItem('agentsGone', JSON.stringify([...agentsGone].slice(-600)))
+
+const clearAgents = () => {
+  for (const project of projects.values()) {
+    for (const sub of project.subs) {
+      if (sub.status !== 'working') {
+        agentsGone.add(sub.id)
+      }
+    }
+  }
+  keepAgentsGone()
+  renderProjects()
+}
+
+let agentSheet = null
+let agentTimer = 0
+
+/**
+ * Shows what an agent did, drawn as a chat of its own: the task it was
+ * given, its thinking, each tool call and what came back, and its report.
+ * While the agent works the page follows it.
+ */
+const openAgent = async (project, sub) => {
+  if (agentSheet === null) {
+    agentSheet = el('dialog', 'sheet file-sheet agent-sheet')
+    document.body.append(agentSheet)
+    agentSheet.addEventListener('click', event => {
+      if (event.target === agentSheet) {
+        agentSheet.close()
+      }
+    })
+    agentSheet.addEventListener('close', () => clearInterval(agentTimer))
+  }
+
+  clearInterval(agentTimer)
+  const head = el('div', 'file-head')
+  const title = el('div', 'agent-title')
+  const state = el('small', '', '')
+  title.append(el('b', '', sub.name), state)
+  const close = el('button', 'pill go', 'Close')
+  close.type = 'button'
+  close.addEventListener('click', () => agentSheet.close())
+  head.append(title, close)
+  const body = el('div', 'agent-body')
+  body.tabIndex = 0
+  body.append(el('div', 'empty', 'Reading what the agent did...'))
+  agentSheet.replaceChildren(head, body)
+
+  if (!agentSheet.open) {
+    agentSheet.showModal()
+  }
+
+  let drawn = -1
+  const fill = async () => {
+    const got = isDemo
+      ? {
+          kind: sub.kind,
+          isDone: sub.status !== 'working',
+          events: [
+            { t: 'user', text: 'Check the contrast of the status badges in both themes and report any that are hard to read.' },
+            { t: 'assistant', isMain: true, blocks: [{ type: 'thinking', text: 'Find the badge colours first, then compare each with its background.' }, { type: 'tool_use', id: 'a1', name: 'Grep', input: { pattern: 'badge', path: 'src' } }] },
+            { t: 'tool_result', id: 'a1', isMain: true, text: 'src/sidebar.tsx:12: <StatusBadge status={status} />' },
+            { t: 'assistant', isMain: true, blocks: [{ type: 'text', text: 'All four badges pass in the dark theme. In the light theme the amber one is hard to read.' }] },
+          ],
+        }
+      : await call('agent:read', project.id, sub.id)
+
+    if (!agentSheet.open || !body.isConnected) {
+      return
+    }
+
+    if (!got || got.error) {
+      body.replaceChildren(el('div', 'empty', got?.error ?? 'What this agent did could not be read.'))
+
+      return
+    }
+
+    state.textContent = [got.kind, got.model, got.isDone ? 'finished' : 'working', got.isCut ? 'its last part' : ''].filter(Boolean).join('  \u00b7  ')
+
+    // Nothing new since the last look: the page, and what is folded open in it, stay as they are.
+    if (got.events.length === drawn) {
+      return
+    }
+
+    const isFirst = drawn < 0
+    const wasAtEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 60
+    drawn = got.events.length
+    // A chat of its own, drawn the way the chat is, and kept out of the list of projects.
+    const own = { id: project.id, name: sub.name, cwd: project.cwd, items: [], current: null, tools: new Map(), asks: new Map(), subs: [], tasks: [], taskAsks: new Map(), usage: null, lastPrompt: '', startedAt: 0, branch: '', isLoaded: true }
+
+    for (const event of got.events) {
+      apply(own, { ts: Date.now(), ...event }, true)
+    }
+
+    body.replaceChildren(
+      ...(own.items.length > 0 ? own.items : [{ kind: 'note', text: 'The agent has not said or done anything yet.' }]).map(item => {
+        const node = paint(item)
+
+        // The first message is the task Claude gave it, not something the person wrote.
+        if (item.kind === 'user') {
+          node.querySelector('.msg-who')?.replaceChildren('Task')
+        }
+
+        return node
+      }),
+    )
+
+    if (isFirst || wasAtEnd) {
+      body.scrollTop = body.scrollHeight
+    }
+  }
+  await fill()
+
+  if (sub.status === 'working' && !isDemo) {
+    agentTimer = setInterval(() => void fill(), 3000)
+  }
+}
+
 const showConversation = (project, events, shouldSelect = true) => {
   Object.assign(project, { items: [], current: null, usage: null, subs: [], tasks: [], hasSession: true, lastPrompt: '', isLoaded: true })
   project.taskAsks.clear()
@@ -4944,7 +5109,8 @@ const skinHref = () => $('skinSheet')?.getAttribute('href')?.replace(/\?v=\d+$/,
 
 // What the skin in use asks for beyond colours, read from its variables:
 // --window-glass (acrylic, mica or tabbed: the desktop shows through the
-// window) and --toolbar (on: the picture toolbar and its extra buttons).
+// window). The big picture buttons are the person's choice (Widgets), not a
+// skin's: the basic buttons sit in the same places in every skin (places.js).
 let sentGlass = ''
 const skinExtras = () => {
   const look = getComputedStyle(document.documentElement)
@@ -4955,7 +5121,6 @@ const skinExtras = () => {
     sentGlass = kind
     void call('window:glass', kind).then(isOn => document.body.classList.toggle('glass', isOn === true))
   }
-  document.body.classList.toggle('has-toolbar', look.getPropertyValue('--toolbar').trim() === 'on')
 }
 
 // Under real glass a skin may draw light streaks that stay put on the screen
@@ -5436,6 +5601,14 @@ const wireWidgets = () => {
     sizeRow.append(el('span', '', 'Size'), sizePick)
     calmRow.title = 'Calm keeps the window still: no moving spectrum, glow, sliding title or blinking.'
     sizeRow.title = 'The size of everything in the window. Ctrl and + or - change it too; Ctrl and 0 puts it back.'
+    // The button row: small buttons, picture beside the words, or big ones, picture above, and three more.
+    const bigRow = el('label', 'wg-layout')
+    const bigPick = el('select')
+    bigPick.append(...[['', 'Small'], ['1', 'Big']].map(([value, words]) => Object.assign(el('option', '', words), { value })))
+    bigPick.value = isBig() ? '1' : ''
+    bigPick.addEventListener('change', () => setBig(bigPick.value === '1'))
+    bigRow.append(el('span', '', 'Buttons'), bigPick)
+    bigRow.title = 'The row of buttons under the top row: small, with each picture beside its words, or big, with the picture above them and three more buttons (Customize, Settings, Guides). It stays as you set it in every skin.'
     // The language of the window's own text. Each language is listed under its own name.
     const langRow = el('label', 'wg-layout')
     const langPick = el('select')
@@ -5446,7 +5619,7 @@ const wireWidgets = () => {
     langRow.append(el('span', '', 'Language'), langPick)
     langRow.title = 'Changes the words of the window itself. Messages, code and the guides stay as they were written. The window draws itself again; chats keep running.'
     // First in the menu: what a person looks for before anything else.
-    menu.prepend(el('div', 'wg-head', 'Window'), langRow, sizeRow, calmRow, el('hr'))
+    menu.prepend(el('div', 'wg-head', 'Window'), langRow, sizeRow, calmRow, bigRow, el('hr'))
     // It opens under its button, at the top of the window.
     const at = $('wgChoose').getBoundingClientRect()
     menu.style.top = `${Math.round(at.bottom + 4)}px`
@@ -6980,6 +7153,17 @@ const start = async () => {
     void deckCmd('vol', loaded.prefs.volume.toFixed(2))
   }
   renderDeck()
+  // Stay awake: as it was left.
+  const putAwake = isOn => {
+    $('awakeBtn').classList.toggle('on', isOn)
+    $('awakeBtn').textContent = isOn ? 'Staying awake' : 'Stay awake'
+  }
+  putAwake(loaded.prefs.keepAwake === true)
+  $('awakeBtn').addEventListener('click', async () => {
+    const isOn = (await call('awake:set', !$('awakeBtn').classList.contains('on'))) === true
+    putAwake(isOn)
+    announce(isOn ? 'The computer will stay awake' : 'The computer may sleep again')
+  })
   // The tab that was open last time.
   document.querySelector(`.tab[data-tab="${localStorage.getItem('tab') ?? ''}"]:not(.active)`)?.click()
   const remembered = localStorage.getItem('active')

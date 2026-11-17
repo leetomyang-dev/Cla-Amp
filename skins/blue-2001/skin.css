@@ -106,8 +106,7 @@
 .led-btn:hover, .led-btn[aria-expanded='true'] { background: #dbe7fb; }
 #right { border: 1px solid #7f9db9; }
 
-/* The picture toolbar and the Widgets panel are part of this look. */
-:root { --toolbar: on; }
+/* The big picture buttons (Widgets, Buttons), when the person switches them on. */
 body.has-toolbar .transport .deck-btn:hover { background: #ffffff; border-color: #7f9db9; box-shadow: inset 0 0 0 1px #f6b93b; }
 .wg-cal .today { color: #ffffff; }
 
