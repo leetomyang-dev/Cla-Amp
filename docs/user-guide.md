@@ -459,9 +459,9 @@ Aqua Glass frosts what is behind the frame: colours come through, blurred, under
 
 ## The spectrum
 
-Click the spectrum, in the Music deck or the top bar, for its next look. Right-click it for everything: 19 looks, 9 colour sets, how many bands, and extras such as peak marks, glow, a reflection, or the loudest part in the middle. Your choices are kept.
+Click the spectrum, in the Music deck or the top bar, for its next look. Right-click it for everything: 21 looks, 9 colour sets, how many bands, and extras such as peak marks, glow, a reflection, or the loudest part in the middle. Your choices are kept.
 
-Some looks move by themselves while music plays: **Flames**, **Sparks** (thrown off loud hits), **Starfield** (the bass sets its speed), **VU needles**, **Pixel rain** and **Bouncing bars**. The colour set **Cover** takes its colours from the cover of what is playing, and uses the skin's colours when there is no cover.
+Some looks move by themselves while music plays: **Flames**, **Sparks** (thrown off loud hits), **Starfield** (the bass sets its speed), **VU needles**, **Pixel rain**, **Bouncing bars** and **Live wires** (bright strands that cross one another, thicker and wilder the louder the music). **Glow tiles** is a wall of lit, rounded squares whose colour runs across the picture; try it with **Rainbow**. The colour set **Cover** takes its colours from the cover of what is playing, and uses the skin's colours when there is no cover.
 
 The same menu has three effects for the rest of the window:
 

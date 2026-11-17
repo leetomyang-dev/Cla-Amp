@@ -23,6 +23,8 @@ export const STYLES = [
   'Starfield',
   'VU needles',
   'Pixel rain',
+  'Glow tiles',
+  'Live wires',
 ]
 
 /** The colour sets. "Skin" is the skin's own quiet, loud and peak colours. */
@@ -156,6 +158,37 @@ const fromCentre = values => {
   return [...half.slice().reverse(), ...half].slice(0, values.length)
 }
 
+// A colour as [red, green, blue], whatever way it is written (#rgb, #rrggbb, rgb(), hsl(), a name).
+const partsOf = (() => {
+  const known = new Map()
+  let probe = null
+
+  return colour => {
+    if (!known.has(colour)) {
+      probe ??= Object.assign(document.createElement('canvas'), { width: 1, height: 1 }).getContext('2d', { willReadFrequently: true })
+      probe.clearRect(0, 0, 1, 1)
+      probe.fillStyle = '#000000'
+      probe.fillStyle = String(colour).trim()
+      probe.fillRect(0, 0, 1, 1)
+      known.set(colour, [...probe.getImageData(0, 0, 1, 1).data.slice(0, 3)])
+
+      if (known.size > 400) {
+        known.delete(known.keys().next().value)
+      }
+    }
+
+    return known.get(colour)
+  }
+})()
+
+/** The colour `share` of the way (0 to 1) from `from` to `to`. */
+const mix = (from, to, share) => {
+  const a = partsOf(from)
+  const b = partsOf(to)
+
+  return `rgb(${a.map((part, i) => Math.round(part + (b[i] - part) * share)).join(', ')})`
+}
+
 // What each canvas showed last, for looks that build on their own picture.
 const seen = new WeakMap()
 
@@ -167,7 +200,7 @@ export const drawStyle = (canvas, values, style, theme, { caps, pad = 4 } = {}) 
   const wide = width - pad * 2
   const full = height - pad * 2
   // With a reflection the picture keeps the upper part and its faint copy lies under it.
-  const tall = chosen.reflect && !['Rings', 'Waterfall', 'Mirror', 'Ribbon', 'Starfield', 'VU needles', 'Pixel rain'].includes(style) ? full * 0.72 : full
+  const tall = chosen.reflect && !['Rings', 'Waterfall', 'Mirror', 'Ribbon', 'Starfield', 'VU needles', 'Pixel rain', 'Live wires'].includes(style) ? full * 0.72 : full
   const floor = pad + tall
   const level = value => Math.min(1, Math.max(0, value))
 
@@ -230,7 +263,7 @@ export const drawStyle = (canvas, values, style, theme, { caps, pad = 4 } = {}) 
   // The floor line: there with no music too, so the spectrum never looks missing.
   context.fillStyle = theme.dim
   context.globalAlpha = 0.35
-  if (style !== 'Starfield' && style !== 'Pixel rain') {
+  if (style !== 'Starfield' && style !== 'Pixel rain' && style !== 'Live wires') {
     context.fillRect(pad, style === 'Mirror' || style === 'Ribbon' ? pad + full / 2 : floor - 1, wide, 1)
   }
   context.globalAlpha = 1
@@ -583,6 +616,139 @@ export const drawStyle = (canvas, values, style, theme, { caps, pad = 4 } = {}) 
       context.arc(x, y, Math.max(1.5, radius * 0.08), 0, Math.PI * 2)
       context.fill()
     }
+  } else if (style === 'Glow tiles') {
+    // A wall of square, rounded tiles. Each column has its own colour, running
+    // across the picture; only lit tiles show, the top ones of a column fade
+    // out, and every tile has a soft light of its own colour around it.
+    const columns = spread(bands, Math.max(6, Math.min(bands.length, Math.floor(wide / 9))))
+    const cell = wide / columns.length
+    const rows = Math.max(4, Math.round(tall / cell))
+    const row = tall / rows
+    const size = Math.max(2, Math.min(cell, row) * 0.78)
+    const round = size * 0.22
+    // Across the picture: the colour set's three colours left to right, or the rainbow.
+    const across = i => {
+      if (isRainbow) {
+        return `hsl(${Math.round(20 + (i / columns.length) * 300) % 360}, 95%, 58%)`
+      }
+      const at = (i / Math.max(1, columns.length - 1)) * 2
+
+      return at <= 1 ? mix(stops[0], stops[1], at) : mix(stops[1], stops[2], at - 1)
+    }
+    const tile = (x, y) => {
+      context.beginPath()
+      context.roundRect(x, y, size, size, round)
+      context.fill()
+    }
+    const blurWas = context.shadowBlur
+    const shadowWas = context.shadowColor
+
+    columns.forEach((value, i) => {
+      const lit = level(value) * rows
+      const whole = Math.floor(lit)
+      const colour = across(i)
+      const x = pad + i * cell + (cell - size) / 2
+      context.fillStyle = colour
+      context.shadowColor = colour
+      context.shadowBlur = Math.max(3, size * 0.9)
+
+      for (let at = 0; at <= whole && at < rows; at += 1) {
+        // The topmost tile is as bright as the part of it that is reached; the two under it ease in.
+        const fromTop = whole - at
+        const alpha = at === whole ? lit - whole : fromTop === 1 ? 0.75 : fromTop === 2 ? 0.9 : 1
+
+        if (alpha > 0.04) {
+          context.globalAlpha = alpha
+          tile(x, floor - (at + 1) * row + (row - size) / 2)
+        }
+      }
+    })
+    // A small bright corner on each lit tile, without its glow.
+    context.shadowBlur = 0
+    context.fillStyle = '#ffffff'
+
+    columns.forEach((value, i) => {
+      const whole = Math.floor(level(value) * rows)
+
+      for (let at = 0; at < whole && at < rows; at += 1) {
+        context.globalAlpha = 0.16
+        context.fillRect(pad + i * cell + (cell - size) / 2 + round * 0.6, floor - (at + 1) * row + (row - size) / 2 + round * 0.6, size * 0.34, Math.max(1, size * 0.14))
+      }
+    })
+    context.globalAlpha = 1
+    context.shadowBlur = blurWas
+    context.shadowColor = shadowWas
+  } else if (style === 'Live wires') {
+    // A few bright strands that run across the picture and cross one another.
+    // Each follows the music in its own way (its own part of the bands, its own
+    // slow sway), is thicker and wilder the louder it gets, and is drawn as a
+    // wide soft light with a thin pale core. With no music they lie nearly flat.
+    const kept = remember(canvas, key, () => ({
+      strands: [0, 1, 2, 3, 4].map(n => ({ sway: 0.6 + n * 0.37, pace: 0.00045 + n * 0.00017, shift: n * 1.9, side: n % 2 === 0 ? 1 : -1, weight: n === 0 ? 1 : n < 3 ? 0.7 : 0.4, eased: [] })),
+    }))
+    const now = performance.now()
+    const middle = pad + full / 2
+    const energy = bands.reduce((sum, value) => sum + level(value), 0) / bands.length
+    const steps = Math.max(16, Math.min(72, Math.round(wide / 9)))
+    const blurWas = context.shadowBlur
+    const shadowWas = context.shadowColor
+    context.lineJoin = 'round'
+    context.lineCap = 'round'
+    context.globalCompositeOperation = 'lighter'
+
+    kept.strands.forEach((strand, n) => {
+      const line = []
+
+      for (let i = 0; i <= steps; i += 1) {
+        const along = i / steps
+        // Its own stretch of the bands, read from a start that drifts slowly.
+        const at = (along * 0.85 + ((n * 0.21 + now * 0.00002) % 1)) % 1
+        const exact = at * (bands.length - 1)
+        const low = Math.floor(exact)
+        const loud = level(bands[low] + ((bands[Math.min(bands.length - 1, low + 1)] ?? 0) - bands[low]) * (exact - low))
+        const sway = Math.sin(along * Math.PI * 2 * strand.sway + now * strand.pace + strand.shift) * 0.5 + Math.sin(along * Math.PI * 5.3 * strand.sway - now * strand.pace * 1.7 + strand.shift * 2) * 0.22
+        // The quieter strands swing nearly as far as the main one; they differ in brightness.
+        const want = (sway * (0.22 + energy * 1.5) + strand.side * (loud - energy) * 1.9) * (0.75 + 0.25 * strand.weight)
+        // Eased, so a strand bends instead of jumping.
+        strand.eased[i] = (strand.eased[i] ?? 0) + (want - (strand.eased[i] ?? 0)) * 0.35
+        line.push([pad + along * wide, middle - Math.max(-1, Math.min(1, strand.eased[i])) * (full / 2 - 2)])
+      }
+      const colour = isRainbow ? `hsl(${Math.round(175 + n * 38) % 360}, 95%, 60%)` : n === 0 ? stops[1] : n < 3 ? mix(stops[1], stops[0], 0.45) : stops[0]
+      const trace = () => {
+        context.beginPath()
+        context.moveTo(line[0][0], line[0][1])
+
+        for (let i = 0; i < line.length - 1; i += 1) {
+          context.quadraticCurveTo(line[i][0], line[i][1], (line[i][0] + line[i + 1][0]) / 2, (line[i][1] + line[i + 1][1]) / 2)
+        }
+        context.lineTo(line[line.length - 1][0], line[line.length - 1][1])
+      }
+      const thick = Math.max(1, (full / 46) * (0.6 + energy * 1.6) * strand.weight)
+      // The soft light, then the strand, then its pale core.
+      context.shadowColor = colour
+      context.shadowBlur = Math.max(4, full / 7)
+      context.strokeStyle = colour
+      context.globalAlpha = 0.35 * strand.weight
+      context.lineWidth = thick * 3.2
+      trace()
+      context.stroke()
+      context.globalAlpha = 0.5 + 0.5 * strand.weight
+      context.lineWidth = thick * 1.4
+      trace()
+      context.stroke()
+      context.shadowBlur = 0
+      context.strokeStyle = mix(colour, '#ffffff', 0.8)
+      context.globalAlpha = 0.9 * strand.weight
+      context.lineWidth = Math.max(0.75, thick * 0.5)
+      trace()
+      context.stroke()
+    })
+    context.globalAlpha = 1
+    context.globalCompositeOperation = 'source-over'
+    context.lineJoin = 'miter'
+    context.lineCap = 'butt'
+    context.shadowBlur = blurWas
+    context.shadowColor = shadowWas
   } else if (style === 'Pixel rain') {
     // Falling columns: a louder band falls faster with a longer tail.
     const columns = spread(bands, Math.max(4, Math.min(bands.length, Math.floor(wide / 5))))
