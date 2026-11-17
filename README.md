@@ -8,7 +8,7 @@ Claude about the files in a folder while your music plays in the same window.
 
 Cla-Amp is an independent, unofficial project. It is not made, sponsored or
 endorsed by Anthropic, by the makers of Winamp, by Spotify, by Google or
-YouTube, or by Microsoft. Claude and Claude Code are Anthropic's; Cla-Amp only
+YouTube, by Microsoft or by Apple. Claude and Claude Code are Anthropic's; Cla-Amp only
 runs Claude Code, unchanged, on your computer.
 
 ![Cla-Amp at work in demo mode: the spectrum moving, Claude running a command and changing a file, cards for what it made, the Widgets menu, and a change of skin](docs/pictures/cla-amp-demo.webp)
@@ -245,8 +245,15 @@ notice is needed.
   highlight.js.
 - Winamp skins come from their own authors, by way of the
   [Winamp Skin Museum](https://skins.webamp.org); Cla-Amp includes none.
-- The names Claude, Winamp, Spotify, YouTube and Windows belong to their
-  owners and are used only to say what Cla-Amp works with.
+- The skins that look like desktops of other years (Blue 2001, Aqua Glass,
+  Study 98, Silver 2013) are drawn from nothing but colours and shapes
+  written in their own files: no picture, icon, sound, typeface file or
+  name from any operating system is in them. They are made by this project
+  and are not from, or endorsed by, Microsoft or Apple.
+- The chime is made by the app from plain tones; there is no sound file.
+- The names Claude, Winamp, Spotify, YouTube, YouTube Music, Windows,
+  Chrome, Edge, Brave and GitHub belong to their owners and are used only
+  to say what Cla-Amp works with.
 
 Every package and its licence: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
