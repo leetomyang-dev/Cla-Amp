@@ -48,9 +48,32 @@ export const openAbout = async () => {
     dialog.close()
     void openGuides()
   })
+  const said = el('p', 'sheet-note about-update', '')
+  const check = el('button', 'pill', 'Check for updates')
+  check.title = 'Asks Cla-Amp’s page on GitHub, now and only now, whether a newer version is out. Nothing is downloaded.'
+  check.addEventListener('click', async () => {
+    check.disabled = true
+    said.textContent = 'Asking GitHub…'
+    const got = (await call('update:check').catch(() => null)) ?? { state: 'error', why: 'Not available here.' }
+    const newest = got.date ? ` The newest is from ${got.date}${got.what ? `: “${got.what}”` : ''}.` : ''
+    const how = ' To update, close Cla-Amp and double-click Update.bat in its folder.'
+    said.textContent =
+      got.state === 'same'
+        ? `This copy is the newest version.${newest}`
+        : got.state === 'behind'
+          ? `A newer version is out: this copy is ${got.count} ${got.count === 1 ? 'change' : 'changes'} behind.${newest}${got.isOwn ? ' This copy also has changes of its own, which Update.bat would not keep.' : ''}${how}`
+          : got.state === 'own'
+            ? `This copy has changes of its own that are not on GitHub, so it cannot be compared.${newest}`
+            : got.state === 'maybe-behind'
+              ? `A newer version seems to be out.${newest} This copy’s files are older than that.${how}`
+              : got.state === 'maybe-same'
+                ? `This copy seems to be the newest version.${newest}`
+                : `Could not check: ${got.why ?? 'something went wrong.'}`
+    check.disabled = false
+  })
   const close = el('button', 'pill go', 'Close')
   close.addEventListener('click', () => dialog.close())
-  foot.append(docs, el('span', 'grow'), close)
+  foot.append(docs, check, el('span', 'grow'), close)
 
   dialog.replaceChildren(
     head,
@@ -70,8 +93,9 @@ export const openAbout = async () => {
     section(
       'What it does with your data',
       'Your chats go to Claude through Claude Code, exactly as they do in Claude Code itself. Cla-Amp has no accounts of its own, no tracking and no server.',
-      'One thing goes out, and only when you use it: a Winamp skin link you paste is fetched from the Winamp Skin Museum. The Privacy guide has the full list.',
+      'Nothing goes out by itself. A Winamp skin link you paste is fetched from the Winamp Skin Museum, and Check for updates, below, asks GitHub whether a newer Cla-Amp is out: each only when you press it. The Privacy guide has the full list.',
     ),
+    said,
     foot,
   )
 

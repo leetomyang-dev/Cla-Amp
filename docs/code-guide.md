@@ -14,6 +14,9 @@ step: the files run as they are.
 | `renderer/styles.css` | The look. The variables at the top are what skins change. |
 | `deck/deck.ps1` | PowerShell helper: plays files, measures the sound the computer is putting out (for the spectrum), and reads and controls the Windows media session (for YouTube Music). |
 | `music-library.mjs` | The deck's library: finds songs in the music folders, reads title, artist, album, genre and number (ID3 and FLAC tags, else the file name) and length (MP3, FLAC, WAV and M4A headers), and reads playlists. Tested by `tests/music-library.test.mjs`. |
+| `tools/engine-check.mjs` | Keeps Cla-Amp in step with its engine. With no argument (part of `npm test`): the contract, that every SDK function, query method and message subtype the code uses (read out of `main.mjs` and `outside-work.mjs`, so the list cannot go stale) is still in the installed SDK's types. With `--news` (`npm run engine`): installed and newest versions of the SDK, the Claude Code inside it and Electron, and the change notes in between with the ones touching Cla-Amp marked; `--all` for every note. See "Taking an engine update" below. |
+| `tools/policy-watch.mjs`, `tools/policy-watch.json` | Watches the public pages whose rules Cla-Amp follows (`npm run policy`, and daily in `.github/workflows/watch.yml`): says which page changed since it was last looked over and whether each sentence relied on is still there, and fails when either is so. The list holds a fingerprint per page and those sentences; the pages' text stays in `.policy-cache/` on this computer only. What each rule means for the code is in [compliance.md](compliance.md). |
+| `tools/undefined-names.eslint.mjs` | The one lint check, run by the Checks on GitHub (`npx eslint@10.15.0 -c tools/undefined-names.eslint.mjs .`): a name used but never defined, in the main process, the window's code, the tools and the tests. It lists the names each side is given by what runs it; add one there when the code starts using it. The lint tool is not a package of Cla-Amp's. |
 | `safe-read.mjs` | Reading a file with a size limit, or only its end, from one opening of it (`readCapped`, `readCappedLater`, `readTail`, `sizeAndBytes`). Use these, not a size check by path followed by a read by path: the code scanner reports that pair as a race, since the file could be swapped in between. To write a file only when it is not there yet, write with the `wx` flag and let "already exists" pass. |
 | `winamp-skin.mjs` | Turns a classic Winamp skin file (.wsz) into a colours-only Cla-Amp skin: a small zip reader, a bitmap reader (plain and RLE8-packed pictures), and the colour mapping (no picture carries over). Tested by `tests/winamp-skin.test.mjs` (`node tests/winamp-skin.test.mjs`). |
 | `skins/` | The skins that ship with the app, and `_template`. |
@@ -55,6 +58,21 @@ and the permission asks that are waiting.
 A project carries `isTrusted`, set by a system dialog when its folder is
 added (`askTrust()`); only a trusted folder's own Claude Code settings are
 loaded.
+
+A trusted folder's `.mcp.json` can name programs to start as connectors, and
+Claude Code run by an app starts them without asking. So `askServers()` asks
+before a message is sent (`project:send`), in a system dialog, about each one
+not yet answered for; the answers are kept on the project as `serversOk` and
+`serversNo`, name to a fingerprint of the definition (`folderServers()`), so
+a changed definition is asked about again. `start()` passes every name not in
+`serversOk` as `settings.disabledMcpjsonServers`. In the off-screen tests
+`CLAAMP_SERVERS=yes` or `no` (with `CLAAMP_DEV=1`) gives the answer, so no
+dialog shows.
+
+`checkForUpdate()` (`update:check`, the **Check for updates** button in
+About) is the one place the app asks GitHub anything, and only on that
+press: the newest commit on `main`, and for a git copy how far `ownCommit()`
+is from it. It downloads and runs nothing.
 
 `desktopChats()` reads the model and effort the Claude desktop app saved for
 each chat (`%LOCALAPPDATA%\Claude-Data\*\claude-code-sessions`). That layout
@@ -235,3 +253,54 @@ session's settings; `childEnv()` strips them.
 - Themes: "Use" reloads through `app:reload` (the page may not navigate, not even to itself). `skins:link` imports a Winamp skin from the link of its page on skins.webamp.org: https only, that site only, the 32-character id in the link names the file, which is fetched from the site's file store (`SKIN_STORE`), at most 30 MB, then goes through the same converter as a picked file (`keepWinampSkin`).
 - First start: with no project open the chat shows `startCard()` (`app.js`): what Cla-Amp is, then sign in, pick a folder, type. Its buttons press the window's own (`signInButton`, `addProject`, the Code tab, `guidesBtn`); `checkSignIn` sets `body.signed-out`, which switches the sign-in step between its button and "You are signed in."
 - `Cla-Amp.bat` starts the app; when `node_modules` is missing it runs `npm install` first, and when Node.js is missing it offers winget or the download page. There is no installer and nothing is signed: the owner chose source only. Its paths were run in copies where the start, the install and the page were replaced by a printed line.
+
+## Taking an engine update
+
+Cla-Amp runs Claude Code through the Claude Agent SDK, and the SDK version in
+`package-lock.json` decides which Claude Code that is (SDK 0.3.N carries Claude
+Code 2.1.N). A fix made in Claude Code reaches Cla-Amp only when that version
+is raised, and new versions come out nearly every day. Three things keep the
+gap short:
+
+1. **Dependabot, daily** (`.github/dependabot.yml`). A new SDK or Electron
+   version arrives as a pull request with its release notes.
+2. **The contract check** (`node tools/engine-check.mjs`, in `npm test` and so
+   in the Checks of that pull request). It fails when the new SDK no longer has
+   a function, a query method or a message subtype that Cla-Amp uses. Green
+   means nothing Cla-Amp calls has gone; it cannot tell that behaviour changed.
+3. **The daily Watch run** on GitHub prints the same review in its log and
+   checks the rules (see [compliance.md](compliance.md)).
+4. **The review** (`npm run engine`). It lists what is newer and marks the
+   change notes that touch what Cla-Amp uses: the SDK's own notes, and from
+   Claude Code's long list the ones about running under an app, Windows,
+   background work and safety. Read the marked ones; a line that starts
+   "Breaking", "Changed", "Removed" or "Deprecated" needs a look at the code
+   that uses the thing named.
+   It also reads the Claude desktop app's release notes
+   (`claude.com/docs/cowork/changelog`): which Claude Code that app carries
+   now, how many versions Cla-Amp is behind it, and what its releases since
+   then say under Code and General about ground the two share (Windows,
+   permissions, background work, sign-in). The desktop app is the yardstick:
+   when it carries a newer Claude Code than Cla-Amp, an update is due.
+   Claude Code's own change log is read from its GitHub repository; the page
+   at `code.claude.com/docs/en/changelog` is made from that same file.
+5. **Security advisories** (`node tools/engine-check.mjs --advisories`, in the
+   review and as its own step of the daily Watch run). It reads the advisories
+   published on Claude Code's GitHub repository and fails when one is fixed
+   only in a Claude Code newer than the one Cla-Amp carries: that is the
+   update not to sit on.
+
+To take one:
+
+- Merge the pull request when its Checks are green and the marked notes hold
+  no surprise, or by hand: `npm install @anthropic-ai/claude-agent-sdk@latest`
+  and commit `package.json` with `package-lock.json`.
+- Then, on a scratch profile (`--user-data-dir`), send one message, let Claude
+  run a command in the background, open an agent's window and stop a task:
+  the parts that lean on the engine most. The Checks cannot do this, since
+  they have no sign-in.
+- A security fix, or a fix for a fault people are hitting, is worth taking the
+  same day. Anything else can wait for the next batch.
+
+People who use Cla-Amp get the new engine with `Update.bat`, which fetches the
+versions the lock file names.

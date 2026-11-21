@@ -9,7 +9,7 @@ right.
 
 Download the ZIP from the project's GitHub page (green Code button, Download ZIP), unzip it, and double-click **Cla-Amp.bat**. The first time, it sets itself up; that needs the free program Node.js, which it offers to install if it is missing. After that a double-click starts Cla-Amp at once.
 
-To get a newer version later, close Cla-Amp and double-click **Update.bat** in the same folder. Nothing updates by itself. For arranging the window to your taste, see the **Quick start** guide.
+To get a newer version later, close Cla-Amp and double-click **Update.bat** in the same folder. Nothing updates by itself; **Check for updates** in About (the **i** button) asks GitHub whether a newer version is out, and only when you press it. For arranging the window to your taste, see the **Quick start** guide.
 
 ## First steps
 
@@ -177,6 +177,11 @@ To get a newer version later, close Cla-Amp and double-click **Update.bat** in t
   message box. **Send now** on one stops what Claude is doing and sends
   it at once; the others follow in their order. **Ctrl+Enter** sends
   the message you are writing that way. The **×** takes one out.
+- **Paths in a reply are links.** A file's name opens it in the file
+  viewer. Any other path that is really on your computer (a program, an
+  archive, a folder) is a link too: a click shows the file in its folder,
+  or opens the folder, in Windows' own file window. Cla-Amp never starts
+  a program from a link; you start it yourself from there.
 - **Spelling.** A misspelt word in a box you type in is underlined.
   Right-click it for suggestions, or to add the word to the dictionary;
   the same menu has Cut, Copy, Paste and Select all. The checking is

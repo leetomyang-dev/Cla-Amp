@@ -1,0 +1,88 @@
+{
+  "pages": [
+    {
+      "name": "Claude Code: legal and compliance",
+      "url": "https://code.claude.com/docs/en/legal-and-compliance.md",
+      "relies": [
+        "The Claude Code binary must not be modified.",
+        "customers may not remove, disable, or restrict any authentication method built into it",
+        "Each end user must authenticate with their own Anthropic API key, Claude subscription plan credentials, or 3P inference provider credential",
+        "You can accurately say, in plain text, that your product has Claude Code preinstalled or that it runs Claude Code.",
+        "developers may not collect, store, or intermediate Claude.ai credentials or session tokens",
+        "Nor does it prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription",
+        "should use API key authentication through"
+      ],
+      "print": "d932c93b6a564bf3",
+      "seen": "2026-11-21"
+    },
+    {
+      "name": "Claude Agent SDK: overview",
+      "url": "https://code.claude.com/docs/en/agent-sdk/overview.md",
+      "relies": [
+        "Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products",
+        "Your product should maintain its own branding and not appear to be Claude Code or any Anthropic product."
+      ],
+      "print": "f0a2c873837a15d7",
+      "seen": "2026-11-21"
+    },
+    {
+      "name": "Claude Code: authentication",
+      "url": "https://code.claude.com/docs/en/authentication.md",
+      "relies": [],
+      "print": "d64fc43fecfcc5eb",
+      "seen": "2026-11-21"
+    },
+    {
+      "name": "Claude Code: the desktop app",
+      "url": "https://code.claude.com/docs/en/desktop.md",
+      "relies": [],
+      "print": "9cbd7ff053b3e29c",
+      "seen": "2026-11-21"
+    },
+    {
+      "name": "Claude Code: data usage",
+      "url": "https://code.claude.com/docs/en/data-usage.md",
+      "relies": [
+        "We give you the choice to allow your data to be used to improve future Claude models.",
+        "Anthropic does not train generative models using code or prompts sent to Claude Code under commercial terms",
+        "Users who allow data use for model improvement: 5-year retention period",
+        "Users who don't allow data use for model improvement: 30-day retention period",
+        "Metrics never include your code, prompts, or file paths.",
+        "Set `DISABLE_TELEMETRY=1` to opt out.",
+        "Set `DISABLE_ERROR_REPORTING=1` to opt out.",
+        "Only the hostname is sent, not the full URL, path, or page contents.",
+        "store session transcripts locally in plaintext"
+      ],
+      "print": "ae9af454022b2b78",
+      "seen": "2026-11-21"
+    },
+    {
+      "name": "Anthropic: usage policy",
+      "url": "https://www.anthropic.com/legal/aup",
+      "relies": [],
+      "print": "1c4120540ab71b49",
+      "seen": "2026-11-21"
+    },
+    {
+      "name": "Anthropic: consumer terms",
+      "url": "https://www.anthropic.com/legal/consumer-terms",
+      "relies": [],
+      "print": "7cbbab473f94269e",
+      "seen": "2026-11-21"
+    },
+    {
+      "name": "Anthropic: commercial terms",
+      "url": "https://www.anthropic.com/legal/commercial-terms",
+      "relies": [],
+      "print": "e3e5517a988e2cde",
+      "seen": "2026-11-21"
+    },
+    {
+      "name": "Anthropic: trademark guidelines",
+      "url": "https://www.anthropic.com/legal/trademark-guidelines",
+      "relies": [],
+      "print": "bbffc346b06c67fa",
+      "seen": "2026-11-21"
+    }
+  ]
+}

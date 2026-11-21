@@ -3,10 +3,13 @@
 # without a person agreeing to it.
 version: 2
 updates:
+  # Daily: the engine (Claude Code, inside the Claude Agent SDK) is updated
+  # nearly every day, and its fixes only reach Cla-Amp through such a pull
+  # request. The Checks run on it, the contract check among them.
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
+      interval: daily
     open-pull-requests-limit: 5
   - package-ecosystem: github-actions
     directory: /

@@ -1,4 +1,6 @@
 export default {
+"Which account: Claude Code’s sign-in offers an API account (Anthropic Console, paid by use) and a Claude subscription. An API account is the route Anthropic documents for apps built on its Agent SDK, as this one is.": "どのアカウントを使うか: Claude Codeのサインインでは、APIアカウント（Anthropic Console、従量課金）とClaudeのサブスクリプションのどちらも選べます。Anthropicが、このアプリのようにAgent SDKで作られたアプリ向けに案内しているのはAPIアカウントです。",
+"Your chats, and Claude Code’s usage numbers and error reports, go to Anthropic under your own account, never to Cla-Amp’s author. What is sent, and how to change it, is in the Privacy guide.": "チャットの内容と、Claude Codeの利用統計およびエラーレポートは、ご自身のアカウントでAnthropicに送信されます。Cla-Ampの作者には一切送信されません。何が送信されるか、その変更方法は、プライバシーガイドに記載しています。",
 "· by {}": "· {}",
 "· Claude account": "· Claudeアカウント",
 "· written in this reply": "· この返信で書き込み",

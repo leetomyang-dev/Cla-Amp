@@ -338,7 +338,7 @@ const readTranscript = id => {
 // and it must change nothing they keep. So the main process itself answers
 // the demo window with made-up values, whatever part of the window asks.
 // Only these calls do their real work there: they read nothing personal.
-const DEMO_REAL = new Set(['about:info', 'docs:read', 'app:reload', 'win', 'win:least', 'window:glass', 'zoom:set', 'text:copy', 'outside:state'])
+const DEMO_REAL = new Set(['about:info', 'update:check', 'docs:read', 'app:reload', 'win', 'win:least', 'window:glass', 'zoom:set', 'text:copy', 'outside:state'])
 const DEMO_SAYS = {
   'settings:read': () => ({ account: { isSignedIn: true, email: 'you@example.com', organization: 'Example', plan: 'max', method: 'Claude subscription' }, files: [] }),
   'look:get': () => ({}),
@@ -789,6 +789,8 @@ class Session {
     this.life += 1
     const life = this.life
     const project = this.project
+    // Connectors from the folder's own .mcp.json that the person has not allowed stay off.
+    const serversOff = project.isTrusted === true ? serversNotAllowed(project) : []
     const running = query({
       prompt: this.prompts(life),
       options: {
@@ -807,6 +809,7 @@ class Session {
         // A folder's own settings can start programs and pre-approve tools, so they
         // load only for a folder the person has said they trust.
         settingSources: project.isTrusted === true ? ['user', 'project', 'local'] : ['user'],
+        settings: serversOff.length > 0 ? { disabledMcpjsonServers: serversOff } : undefined,
         systemPrompt: { type: 'preset', preset: 'claude_code' },
         canUseTool: (tool, input, options) => this.ask(tool, input, options),
         // The person's own switch: Claude Code connects to the Claude in Chrome
@@ -1560,7 +1563,7 @@ const askTrust = async folder => {
     type: 'question',
     title: 'Cla-Amp',
     message: 'Do you trust this folder?',
-    detail: `${folder}\n\nA folder can carry its own Claude Code settings. Those can run programs when a chat starts and let Claude use tools without asking you. Trust only folders whose contents you know, such as your own projects.\n\nYou can still chat in a folder you do not trust: its own settings are left out.`,
+    detail: `${folder}\n\nA folder can carry its own Claude Code settings. Those can run programs when a chat starts and let Claude use tools without asking you. Trust only folders whose contents you know, such as your own projects.\n\nYou can still chat in a folder you do not trust: its own settings are left out.\n\nPrograms that a trusted folder asks to start as connectors (its .mcp.json file) are asked about separately, by name.`,
     buttons: ['Open without its settings', 'Trust this folder'],
     defaultId: 0,
     cancelId: 0,
@@ -1568,6 +1571,105 @@ const askTrust = async folder => {
   })
 
   return picked.response === 1
+}
+
+/**
+ * The connectors a folder's own .mcp.json asks to start: name -> { print, line }.
+ * `print` is a fingerprint of the definition, so a yes holds only for the
+ * program that was shown; `line` is that program, for showing.
+ */
+const folderServers = cwd => {
+  const found = {}
+
+  try {
+    const bytes = readCapped(path.join(cwd, '.mcp.json'), 1 << 20)
+    const said = bytes === null ? null : JSON.parse(bytes.toString('utf8')).mcpServers
+
+    for (const [name, one] of Object.entries(said && typeof said === 'object' ? said : {})) {
+      const line = typeof one?.command === 'string' ? [one.command, ...(Array.isArray(one.args) ? one.args : [])].join(' ') : String(one?.url ?? one?.type ?? '')
+
+      found[name] = {
+        print: createHash('sha256').update(JSON.stringify(one ?? null)).digest('hex').slice(0, 16),
+        // eslint-disable-next-line no-control-regex
+        line: line.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').slice(0, 300),
+      }
+    }
+  } catch {
+    // No such file, or not one Claude Code could read either.
+  }
+
+  return found
+}
+
+/** The names in a folder's .mcp.json that the person has not said yes to, as each stands now. */
+const serversNotAllowed = project =>
+  Object.entries(folderServers(project.cwd))
+    .filter(([name, one]) => project.serversOk?.[name] !== one.print)
+    .map(([name]) => name)
+
+// For the off-screen tests, which must show no dialog: the answer to give.
+const SERVERS_ANSWER = IS_DEV ? process.env.CLAAMP_SERVERS : undefined
+const askingServers = new Map()
+
+/**
+ * A trusted folder's .mcp.json can start programs. Claude Code asks about each
+ * in its terminal; run by an app it does not, so this asks: once for each
+ * connector, and again when its definition changes. Until the person says
+ * yes, the connector is left switched off.
+ */
+const askServers = project => {
+  if (project.isTrusted !== true || IS_DEMO) {
+    return Promise.resolve()
+  }
+
+  if (askingServers.has(project.id)) {
+    return askingServers.get(project.id)
+  }
+
+  const found = folderServers(project.cwd)
+  const fresh = Object.entries(found).filter(([name, one]) => project.serversOk?.[name] !== one.print && project.serversNo?.[name] !== one.print)
+
+  if (fresh.length === 0) {
+    return Promise.resolve()
+  }
+
+  const asking = (async () => {
+    const list = fresh.slice(0, 12).map(([name, one]) => `${name.slice(0, 80)}\n    ${one.line || '(nothing to show)'}`)
+    const isYes =
+      SERVERS_ANSWER !== undefined
+        ? SERVERS_ANSWER === 'yes'
+        : (
+            await dialog.showMessageBox(win, {
+              type: 'question',
+              title: 'Cla-Amp',
+              message: fresh.length === 1 ? 'This folder asks to start a connector' : `This folder asks to start ${fresh.length} connectors`,
+              detail: `${project.cwd}\n\nIts .mcp.json file names ${fresh.length === 1 ? 'a program' : 'programs'} for Claude Code to start with each chat here, and Claude can then use ${fresh.length === 1 ? 'its' : 'their'} tools:\n\n${list.join('\n\n')}${fresh.length > 12 ? `\n\nand ${fresh.length - 12} more` : ''}\n\nAllow only what you know. You are asked again if one of them changes.`,
+              buttons: ['Leave switched off', fresh.length === 1 ? 'Allow it' : 'Allow them'],
+              defaultId: 0,
+              cancelId: 0,
+              noLink: true,
+            })
+          ).response === 1
+
+    project.serversOk ??= {}
+    project.serversNo ??= {}
+
+    for (const [name, one] of fresh) {
+      delete project.serversOk[name]
+      delete project.serversNo[name]
+      ;(isYes ? project.serversOk : project.serversNo)[name] = one.print
+    }
+    saveState()
+
+    // A chat already waiting was started with them off: it starts afresh with the next message.
+    if (isYes) {
+      sessions.get(project.id)?.sleep()
+    }
+  })().finally(() => askingServers.delete(project.id))
+
+  askingServers.set(project.id, asking)
+
+  return asking
 }
 
 /** A folder path as a call gave it, made whole and checked to be a real folder. */
@@ -1605,6 +1707,40 @@ const openClaudeConsole = (args, cwd) => {
 const BROWSER_ENDS = ['.html', '.htm', '.pdf', '.svg']
 
 /** The file a reply names: a full path, or one inside the project's folder. A line number after it is dropped. null when there is no such file. */
+/**
+ * A path written in a reply, as a place on this computer: { path, kind } with
+ * kind 'file' or 'folder', or null when there is nothing there. A relative one
+ * is read from the project's folder; %APPDATA% and the like, and a leading ~,
+ * are filled in. Read only: it looks, and changes nothing.
+ */
+const placeNamed = (id, name) => {
+  const project = state.projects.find(one => one.id === id)
+
+  if (typeof name !== 'string' || name.length > 600 || name.includes('\0')) {
+    return null
+  }
+
+  const KNOWN = ['APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'TEMP', 'TMP', 'PROGRAMFILES', 'PROGRAMDATA', 'PUBLIC', 'ONEDRIVE']
+  const plain = name
+    .trim()
+    .replace(/^file:\/\/\/?/i, '')
+    .replace(/^%([A-Za-z]+)%/, (all, key) => (KNOWN.includes(key.toUpperCase()) ? (process.env[key.toUpperCase()] ?? process.env[key] ?? all) : all))
+    .replace(/^~(?=[\\/]|$)/, () => app.getPath('home'))
+
+  try {
+    const full = path.isAbsolute(plain) ? path.normalize(plain) : project ? path.resolve(project.cwd, plain) : null
+
+    if (full === null) {
+      return null
+    }
+    const found = fs.statSync(full)
+
+    return found.isFile() ? { path: full, kind: 'file' } : found.isDirectory() ? { path: full, kind: 'folder' } : null
+  } catch {
+    return null
+  }
+}
+
 const fileNamed = (id, name) => {
   const project = state.projects.find(one => one.id === id)
 
@@ -1879,6 +2015,100 @@ const cleanLook = raw => {
   }
 
   return look
+}
+
+// Where Cla-Amp's own newest version is asked about, and nothing else.
+const HOME_API = 'https://api.github.com/repos/leetomyang-dev/Cla-Amp'
+
+/** The commit this copy is at, when the folder was made with git; otherwise null. */
+const ownCommit = () => {
+  const isSha = text => /^[0-9a-f]{40}$/.test(text)
+
+  try {
+    const head = readCapped(path.join(ROOT, '.git', 'HEAD'), 4096)?.toString('utf8').trim() ?? ''
+
+    if (isSha(head)) {
+      return head
+    }
+
+    const ref = /^ref: (refs\/heads\/[\w./-]+)$/.exec(head)?.[1]
+
+    if (!ref || ref.includes('..')) {
+      return null
+    }
+
+    try {
+      const loose = readCapped(path.join(ROOT, '.git', ...ref.split('/')), 4096)?.toString('utf8').trim() ?? ''
+
+      if (isSha(loose)) {
+        return loose
+      }
+    } catch {
+      // Not a loose ref: it is in the packed list.
+    }
+
+    const packed = readCapped(path.join(ROOT, '.git', 'packed-refs'), 4 << 20)?.toString('utf8') ?? ''
+    const line = packed.split('\n').find(one => one.endsWith(` ${ref}`))
+
+    return line && isSha(line.slice(0, 40)) ? line.slice(0, 40) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * "Check for updates", and only when the person presses it: asks GitHub what
+ * the newest Cla-Amp is and says how this copy compares. It downloads and
+ * runs nothing; updating stays Update.bat, run by hand.
+ */
+const checkForUpdate = async () => {
+  const ask = async address => {
+    const answer = await fetch(address, {
+      headers: { 'user-agent': 'Cla-Amp', accept: 'application/vnd.github+json' },
+      signal: AbortSignal.timeout(15000),
+      redirect: 'error',
+      credentials: 'omit',
+    })
+
+    return answer.ok ? JSON.parse((await answer.text()).slice(0, 2 << 20)) : { status: answer.status }
+  }
+  // What GitHub says is shown as plain text, short.
+  // eslint-disable-next-line no-control-regex
+  const short = text => String(text ?? '').split('\n')[0].replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').slice(0, 120)
+
+  try {
+    const newest = await ask(`${HOME_API}/commits/main`)
+
+    if (!/^[0-9a-f]{40}$/.test(newest.sha ?? '')) {
+      return { state: 'error', why: newest.status === 403 || newest.status === 429 ? 'GitHub is turning requests away for now. Try again in an hour.' : 'GitHub did not answer as expected.' }
+    }
+
+    const about = { date: short(newest.commit?.committer?.date).slice(0, 10), what: short(newest.commit?.message) }
+    const mine = ownCommit()
+
+    if (mine === newest.sha) {
+      return { state: 'same', ...about }
+    }
+
+    if (mine !== null) {
+      const gap = await ask(`${HOME_API}/compare/${mine}...${newest.sha}`)
+
+      if (Number.isInteger(gap.ahead_by) && Number.isInteger(gap.behind_by)) {
+        // "ahead_by" is how far the newest is ahead of this copy.
+        return gap.ahead_by > 0 ? { state: 'behind', count: gap.ahead_by, isOwn: gap.behind_by > 0, ...about } : { state: gap.behind_by > 0 ? 'own' : 'same', ...about }
+      }
+
+      return { state: 'own', ...about }
+    }
+
+    // A copy from the ZIP has no record of its version: its files carry the date of the version they came from.
+    const filed = fs.statSync(path.join(ROOT, 'main.mjs')).mtimeMs
+    const made = Date.parse(newest.commit?.committer?.date ?? '')
+
+    return { state: Number.isFinite(made) && made > filed + 3600000 ? 'maybe-behind' : 'maybe-same', ...about }
+  } catch {
+    return { state: 'error', why: 'GitHub could not be reached.' }
+  }
 }
 
 /** What the About page shows: versions, and the parts the app is built from with their licences. */
@@ -3354,7 +3584,15 @@ const handlers = {
   // What an agent of a chat did, from Claude Code's own saved file. Read only.
   'agent:read': (id, toolId) => readAgent(id, toolId),
   'project:transcript': id => (state.projects.some(one => one.id === id) ? readTranscript(id) : []),
-  'project:send': (id, text, files, isNow) => sessionOf(id)?.submit(String(text), cleanFiles(files), isNow === true),
+  'project:send': async (id, text, files, isNow) => {
+    const project = state.projects.find(one => one.id === id)
+
+    if (project) {
+      await askServers(project)
+    }
+
+    return sessionOf(id)?.submit(String(text), cleanFiles(files), isNow === true)
+  },
   // "Attach": the person picks files; only their paths come back.
   'attach:pick': async () => {
     const picked = await dialog.showOpenDialog(win, { title: 'Attach files', properties: ['openFile', 'multiSelections'] })
@@ -3930,6 +4168,7 @@ const handlers = {
     return { url: pathToFileURL(copy).href }
   },
   'about:info': () => aboutInfo(),
+  'update:check': () => checkForUpdate(),
   // The Settings page: the account, and what each of Claude Code's settings files sets. Read only.
   'settings:read': async id => {
     const project = state.projects.find(one => one.id === id)
@@ -4182,6 +4421,30 @@ const handlers = {
     }
 
     return { ...said, kind: end === '.md' || end === '.markdown' ? 'markdown' : 'text', text: text.toString('utf8'), language: end.slice(1) }
+  },
+  // Whether a path written in a reply is a file or a folder on this computer
+  // (null when it is neither): only then does the window make it a link.
+  'path:kind': (id, name) => placeNamed(id, name)?.kind ?? null,
+  // Shows such a place in Windows' own file window: a file is marked in its
+  // folder, a folder is opened. Nothing is ever run from a link: a program
+  // is shown, and starting it is the person's own double-click.
+  'path:show': (id, name) => {
+    const place = placeNamed(id, name)
+
+    if (place?.kind === 'file') {
+      shell.showItemInFolder(place.path)
+    } else if (place?.kind === 'folder') {
+      // Asked again at this moment, so that only a folder is ever handed to "open".
+      try {
+        if (fs.statSync(place.path).isDirectory()) {
+          void shell.openPath(place.path)
+        }
+      } catch {
+        return false
+      }
+    }
+
+    return place !== null
   },
   // Shows the file in its folder, in Windows' own file window.
   'file:reveal': (id, name) => {

@@ -1,4 +1,6 @@
 export default {
+"Which account: Claude Code’s sign-in offers an API account (Anthropic Console, paid by use) and a Claude subscription. An API account is the route Anthropic documents for apps built on its Agent SDK, as this one is.": "Qual conta: o login do Claude Code oferece uma conta de API (Anthropic Console, paga por uso) e uma assinatura do Claude. Uma conta de API é o caminho que a Anthropic documenta para apps criados com o Agent SDK, como este.",
+"Your chats, and Claude Code’s usage numbers and error reports, go to Anthropic under your own account, never to Cla-Amp’s author. What is sent, and how to change it, is in the Privacy guide.": "Suas conversas, e os números de uso e relatórios de erros do Claude Code, vão para a Anthropic com a sua própria conta, nunca para o autor do Cla-Amp. O que é enviado, e como mudar isso, está no guia de Privacidade.",
 "· by {}": "· por {}",
 "· Claude account": "· conta do Claude",
 "· written in this reply": "· escritos nesta resposta",

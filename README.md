@@ -157,15 +157,20 @@ What signing in involves:
 ## Privacy
 
 - Cla-Amp has no server, no accounts of its own, and no tracking.
-- Your chats go to Claude through Claude Code, exactly as they do in Claude
-  Code itself.
+- Your chats go to Anthropic through Claude Code, exactly as they do in
+  Claude Code itself, under your own account. Claude Code's usage numbers and
+  error reports go to Anthropic too. None of it reaches Cla-Amp's author.
+  What is sent, whether it may be used for training and how to turn parts of
+  it off are Anthropic's and yours to set:
+  [the privacy page](docs/privacy.md#what-claude-code-sends-to-anthropic-and-how-to-change-it).
 - Nothing on it can be reached from the network. It adds nothing to your
   browser.
 - To draw the spectrum it captures the sound your computer is playing, in
   memory only; nothing is saved or sent.
-- Two things go out, each only when you use it: **Import from link** fetches
-  the one Winamp skin you pointed it at from the Winamp Skin Museum, and
-  **Update.bat** downloads Cla-Amp's newest version from this page.
+- Three things go out, each only when you use it: **Import from link**
+  fetches the one Winamp skin you pointed it at from the Winamp Skin Museum,
+  **Check for updates** (in About) asks this page whether a newer Cla-Amp is
+  out, and **Update.bat** downloads Cla-Amp's newest version from this page.
 - It holds no password, key or token for any service.
 - It reads the Claude desktop app's list of chats on your computer, to show
   their titles and grouping. It never changes that app's files.
@@ -268,4 +273,7 @@ Every package and its licence: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
   leaves it, how to remove it.
 - [docs/security.md](docs/security.md): what it protects against, reads,
   writes and sends.
+- [docs/compliance.md](docs/compliance.md): Anthropic's published rules for
+  apps that run Claude Code, how Cla-Amp follows each, and how that is kept
+  up to date.
 - [docs/code-guide.md](docs/code-guide.md): for people changing the code.

@@ -1,0 +1,37 @@
+# Once a day: have the rules Cla-Amp follows changed, and is the engine it runs
+# behind? Read-only: it reads public pages and changes nothing. It fails when a
+# watched page changed, a sentence relied on is gone, or Claude Code has a
+# published security advisory that the version Cla-Amp carries does not fix,
+# and GitHub then tells the owner. What to do next is in docs/compliance.md.
+name: Watch
+
+on:
+  schedule:
+    - cron: '23 14 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    name: Rules and engine updates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      # Exactly the versions in package-lock.json; no install scripts are run.
+      - run: npm ci --ignore-scripts
+      - name: Engine updates (for reading; never fails the run)
+        run: node tools/engine-check.mjs --news || true
+      # Fails when a published advisory is fixed only in a newer Claude Code.
+      - name: Security advisories for the engine
+        run: node tools/engine-check.mjs --advisories
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Rules Cla-Amp follows
+        if: always()
+        run: node tools/policy-watch.mjs

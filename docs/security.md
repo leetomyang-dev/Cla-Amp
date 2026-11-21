@@ -69,6 +69,28 @@ or let tools run without asking. When a folder is added, Cla-Amp asks, in a
 system dialog the page cannot imitate, whether you trust it. If not, the chat
 still works but only your own settings load.
 
+### A folder's connectors are asked about by name
+
+A trusted folder's `.mcp.json` file can name programs for Claude Code to
+start as connectors. In its terminal Claude Code asks about each; run by an
+app it does not (tested on Claude Code 2.1.330: such a program started with
+no question). So Cla-Amp asks, in a system dialog, before the first message
+in such a folder: each connector by name, with the program it would start.
+Until the answer is yes they are switched off for that chat
+(`disabledMcpjsonServers`), and the yes holds only for the definition that
+was shown: a changed one is asked about again. A folder that is not trusted
+has neither its settings nor its connectors loaded (tested the same way: a
+hook and a connector in such a folder did not run).
+
+### Commands are not sandboxed on Windows
+
+Claude Code can confine the commands it runs to the project folder with an
+operating-system sandbox, but only on macOS, Linux and WSL2: Anthropic's
+page says that on Windows itself commands run unsandboxed. Cla-Amp runs on
+Windows, so that protection is not there, here or in Claude Code's own
+terminal on Windows. A command you allow can do whatever your account can.
+The checks that do apply are the permission card and the mode you chose.
+
 ### Permission cards show everything
 
 When Claude asks to use a tool, the card shows the whole command, or the file
@@ -191,6 +213,9 @@ set and the app runs from its source folder.
 - **Which folders to trust**, and which full skins to use.
 - **Connectors and plugins.** They are Claude Code's own and run with its
   rights. Cla-Amp only switches them on and off.
+- **Keeping up to date.** Nothing updates by itself, so a fix reaches you
+  when you run Update.bat. **Check for updates** in About says whether a
+  newer version is out.
 
 ## What the app reads and writes
 
@@ -243,9 +268,12 @@ set and the app runs from its source folder.
   playing, whatever program it comes from, a moment at a time and in memory
   only. Each moment is measured and discarded. It is never saved to disk and
   never sent anywhere.
-- Sends nothing anywhere by itself. One thing goes out, and only when you
+- Sends nothing anywhere by itself. Two things go out, each only when you
   use it: with **Import from link**, the one skin file your pasted link
-  names is fetched from the Winamp Skin Museum's file store. Apart from
+  names is fetched from the Winamp Skin Museum's file store; and **Check for
+  updates** in About asks GitHub, over HTTPS, what Cla-Amp's newest version
+  is and how this copy compares. The answer is shown as plain text; nothing
+  is downloaded or run, and updating stays Update.bat. Apart from
   the program, **Update.bat** is a script the person runs by hand: it
   downloads Cla-Amp's newest version from its GitHub page over HTTPS and
   copies it over the folder. Cla-Amp never runs it.
@@ -266,9 +294,11 @@ set and the app runs from its source folder.
 ## Known limits
 
 - A full skin you approved is trusted with the look of everything, as above.
-- Whether Claude Code would run an untrusted folder's hooks through the SDK
-  was not tested; the trust question means such settings are not loaded
-  either way.
+- A hook in a trusted folder's own settings runs when a chat starts, with
+  no further question: that is what trusting the folder means.
+- The connector question reads `.mcp.json` as plain JSON. A file that is
+  not plain JSON names no connectors here.
+- Commands are not sandboxed on Windows (above).
 - Usage limits and the desktop app's chat records rely on formats that can
   change.
 - Sign in was run after the rewrite and the sign-in completed, but nobody

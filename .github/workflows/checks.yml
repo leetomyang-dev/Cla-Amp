@@ -26,6 +26,11 @@ jobs:
       # Exactly the versions in package-lock.json; no install scripts are run.
       - run: npm ci --ignore-scripts
       - run: npm test
+      # A name used but never defined fails only when its line runs. The lint
+      # tool is fetched here at one exact version; it is not one of Cla-Amp's
+      # own packages.
+      - name: No undefined names
+        run: npx --yes eslint@10.15.0 -c tools/undefined-names.eslint.mjs .
       - name: Known vulnerabilities in dependencies
         run: npm audit --audit-level=moderate
       - name: No program files in the repository

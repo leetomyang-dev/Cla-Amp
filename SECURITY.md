@@ -36,7 +36,7 @@ Things a careful person, or an antivirus program, might notice:
 | Stops those browsers when you close Cla-Amp | So nothing of its own plays on or lingers. Only a browser started with Cla-Amp's own profile folder is ever stopped; your everyday browser is never matched | `deck/close-browsers.ps1` |
 | Keeps the computer awake | Only while you switch **Stay awake** on | `main.mjs` (`awake:set`) |
 | Reads Claude Code's saved chats and the Claude desktop app's list of chats | To show them. The desktop app's files are never changed | `main.mjs` |
-| Goes on the internet by itself | It does not. Claude Code talks to Anthropic as it always does; the players are the services' own pages in your browser. Two things fetch something, each only when you press them: **Import from link** (one Winamp skin) and `Update.bat` (the newest Cla-Amp, run by hand) | `docs/privacy.md` |
+| Goes on the internet by itself | It does not. Claude Code talks to Anthropic as it always does; the players are the services' own pages in your browser. Three things fetch something, each only when you press them: **Import from link** (one Winamp skin), **Check for updates** in About (asks GitHub whether a newer Cla-Amp is out; downloads nothing) and `Update.bat` (the newest Cla-Amp, run by hand) | `docs/privacy.md` |
 
 What it does not do: it has no server and no account of its own, listens on
 no port, holds no password, key or token, adds nothing to your browser, and

@@ -898,6 +898,76 @@ const findFile = async name => {
   return { name, got: first }
 }
 
+// A path as people write one: from a drive, a share, the home folder or a
+// %FOLDER%, or a relative one with a slash in it. Whether it is really there
+// is asked before it becomes a link.
+const PLACE = /^(?:[a-z]:[\\/]|\\\\[\w.$-]+[\\/]|~[\\/]|%[a-z]+%[\\/]|\.{1,2}[\\/]|[\w.@+()-][\w.@+() -]*[\\/])[^<>"|?*\n]{0,400}$/i
+// What each such path turned out to be, per project: 'file', 'folder' or null.
+const placeKinds = new Map()
+
+/**
+ * Makes a path in a reply a link when it is a file or a folder on this
+ * computer. A click shows it in Windows' file window: a file marked in its
+ * folder, a folder opened. It never runs anything: a program is only shown.
+ */
+const asPlaceLink = (first, name) => {
+  const id = activeId
+  const key = `${id}|${name}`
+  const wire = (kind, node) => {
+    if (!kind || node.classList.contains('file-link')) {
+      return
+    }
+    const show = () => void call('path:show', id, name)
+    node.classList.add('file-link', 'place-link')
+    node.title = kind === 'folder' ? `${name}\nClick to open this folder.` : `${name}\nClick to show this file in its folder. Cla-Amp does not run programs from a link.`
+    node.tabIndex = 0
+    node.setAttribute('role', 'button')
+    node.addEventListener('click', event => {
+      event.preventDefault()
+      show()
+    })
+    node.addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault()
+        show()
+      }
+    })
+    node.addEventListener('contextmenu', event => {
+      event.stopPropagation()
+      popMenu(event, [
+        [kind === 'folder' ? 'Open the folder' : 'Show in folder', show],
+        ['Copy path', () => void navigator.clipboard.writeText(name)],
+      ])
+    })
+  }
+
+  if (placeKinds.has(key)) {
+    wire(placeKinds.get(key), first)
+
+    return
+  }
+
+  if (isDemo) {
+    return
+  }
+  void call('path:kind', id, name).then(kind => {
+    placeKinds.set(key, kind ?? null)
+
+    if (placeKinds.size > 2000) {
+      placeKinds.delete(placeKinds.keys().next().value)
+    }
+    // A reply is drawn again and again while it arrives, so the piece asked
+    // about may be gone by now: every piece on the page that says this path is made the link.
+    requestAnimationFrame(() => {
+      for (const one of document.querySelectorAll('.msg-body code, .file-body code')) {
+        if (one.parentElement?.nodeName !== 'PRE' && !one.closest('a') && one.textContent.trim() === name) {
+          wire(kind, one)
+        }
+      }
+    })
+  })
+}
+
 /** Makes a name in a reply open the file viewer when clicked. */
 const asFileLink = (node, name) => {
   node.classList.add('file-link')
@@ -1052,8 +1122,15 @@ const markdown = text => {
 
   // A file's name written in code type opens the same way.
   for (const code of holder.querySelectorAll('code')) {
-    if (code.parentElement?.nodeName !== 'PRE' && !code.closest('a') && FILE_NAME.test(code.textContent.trim())) {
-      asFileLink(code, code.textContent.trim())
+    if (code.parentElement?.nodeName !== 'PRE' && !code.closest('a')) {
+      const said = code.textContent.trim()
+
+      if (FILE_NAME.test(said)) {
+        asFileLink(code, said)
+      } else if (PLACE.test(said)) {
+        // Any other file (a program, an archive) or a folder: a link once it is known to be there.
+        asPlaceLink(code, said)
+      }
     }
   }
 
@@ -2419,10 +2496,12 @@ const startCard = () => {
       'A music-player-style workspace that runs Claude Code. Claude reads and changes the files in a folder you pick while you chat with it, and your music plays alongside. It uses the same Claude Code and the same saved chats as the Claude desktop app and the terminal.',
     ),
     step(1, 'Sign in to Claude', 'Your browser opens on Claude\'s own sign-in page. Cla-Amp never sees your password. You need your own Claude account.', signButton, signed),
+    el('span', 'start-what', "Which account: Claude Code’s sign-in offers an API account (Anthropic Console, paid by use) and a Claude subscription. An API account is the route Anthropic documents for apps built on its Agent SDK, as this one is."),
     step(2, 'Pick a folder', 'Claude works inside one folder at a time. Add a new one, or carry on with a chat you already have in Claude Code.', buttons),
     step(3, 'Type a message', 'Use the box at the bottom. Claude asks before it changes a file or runs a command, unless you choose otherwise there.'),
     more,
     el('span', 'start-what', 'Privacy: Cla-Amp has no server and collects nothing. What leaves your computer, and when, is in the Privacy guide (the ? button).'),
+    el('span', 'start-what', "Your chats, and Claude Code’s usage numbers and error reports, go to Anthropic under your own account, never to Cla-Amp’s author. What is sent, and how to change it, is in the Privacy guide."),
   )
 
   return card

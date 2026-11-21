@@ -5,3 +5,5 @@ out-*.txt
 ClaudeAmp-review.md
 ClaudeAmp-independent-legal-review.md
 anthropic-question.md
+# The watched pages as last read, for showing what changed (tools/policy-watch.mjs).
+.policy-cache/
