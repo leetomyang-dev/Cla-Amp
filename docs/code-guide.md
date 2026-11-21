@@ -72,7 +72,15 @@ dialog shows.
 `checkForUpdate()` (`update:check`, the **Check for updates** button in
 About) is the one place the app asks GitHub anything, and only on that
 press: the newest commit on `main`, and for a git copy how far `ownCommit()`
-is from it. It downloads and runs nothing.
+is from it. For a copy that is behind it also reads `docs/whats-new.md` from
+GitHub and shows the notes this copy's page lacks (`whats-new.mjs`,
+`tests/whats-new.test.mjs`), as plain text. It downloads and runs nothing.
+
+**Every change a person would notice gets a line in `docs/whats-new.md`**, in
+the same commit, under the day's date ("20 November 2026"), written for a
+user and not a developer: what they can now do or what stopped going wrong,
+in a sentence or two, no file or function names. That page is what Check for
+updates shows and what the guides list as "What's new".
 
 `desktopChats()` reads the model and effort the Claude desktop app saved for
 each chat (`%LOCALAPPDATA%\Claude-Data\*\claude-code-sessions`). That layout

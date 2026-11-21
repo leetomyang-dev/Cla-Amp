@@ -273,6 +273,8 @@ Every package and its licence: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
   leaves it, how to remove it.
 - [docs/security.md](docs/security.md): what it protects against, reads,
   writes and sends.
+- [docs/whats-new.md](docs/whats-new.md): what changed, newest first, in
+  plain words.
 - [docs/compliance.md](docs/compliance.md): Anthropic's published rules for
   apps that run Claude Code, how Cla-Amp follows each, and how that is kept
   up to date.

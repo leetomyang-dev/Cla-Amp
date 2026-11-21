@@ -14,6 +14,7 @@ import { BrowserWindow, Menu, Tray, app, clipboard, dialog, ipcMain, powerSaveBl
 import { describeSong, readCover, readPlaylist, scanFolders } from './music-library.mjs'
 import { chatsFolder, countOutside, listOutside } from './outside-work.mjs'
 import { readCapped, readCappedLater, readEndLater, readTail, sizeAndBytes } from './safe-read.mjs'
+import { notesNewTo } from './whats-new.mjs'
 import { convertWinampSkin } from './winamp-skin.mjs'
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url))
@@ -2019,6 +2020,34 @@ const cleanLook = raw => {
 
 // Where Cla-Amp's own newest version is asked about, and nothing else.
 const HOME_API = 'https://api.github.com/repos/leetomyang-dev/Cla-Amp'
+const HOME_NOTES = 'https://raw.githubusercontent.com/leetomyang-dev/Cla-Amp/main/docs/whats-new.md'
+
+/** The notes on GitHub's "What's new" page that this copy's page does not have. Nothing, when they cannot be read. */
+const notesNotHere = async () => {
+  try {
+    // For the off-screen tests: a file standing in for the page on GitHub.
+    const standIn = IS_DEV ? process.env.CLAAMP_NOTES_FILE : undefined
+    const answer = standIn
+      ? { ok: true, text: async () => fs.readFileSync(standIn, 'utf8') }
+      : await fetch(HOME_NOTES, { headers: { 'user-agent': 'Cla-Amp' }, signal: AbortSignal.timeout(15000), redirect: 'error', credentials: 'omit' })
+
+    if (!answer.ok) {
+      return { groups: [], more: 0 }
+    }
+
+    let mine = ''
+
+    try {
+      mine = readCapped(path.join(ROOT, 'docs', 'whats-new.md'), 1 << 20)?.toString('utf8') ?? ''
+    } catch {
+      // A copy from before the page existed: everything on it is new.
+    }
+
+    return notesNewTo((await answer.text()).slice(0, 1 << 20), mine)
+  } catch {
+    return { groups: [], more: 0 }
+  }
+}
 
 /** The commit this copy is at, when the folder was made with git; otherwise null. */
 const ownCommit = () => {
@@ -2095,7 +2124,9 @@ const checkForUpdate = async () => {
 
       if (Number.isInteger(gap.ahead_by) && Number.isInteger(gap.behind_by)) {
         // "ahead_by" is how far the newest is ahead of this copy.
-        return gap.ahead_by > 0 ? { state: 'behind', count: gap.ahead_by, isOwn: gap.behind_by > 0, ...about } : { state: gap.behind_by > 0 ? 'own' : 'same', ...about }
+        return gap.ahead_by > 0
+          ? { state: 'behind', count: gap.ahead_by, isOwn: gap.behind_by > 0, ...about, news: await notesNotHere() }
+          : { state: gap.behind_by > 0 ? 'own' : 'same', ...about }
       }
 
       return { state: 'own', ...about }
@@ -2105,7 +2136,10 @@ const checkForUpdate = async () => {
     const filed = fs.statSync(path.join(ROOT, 'main.mjs')).mtimeMs
     const made = Date.parse(newest.commit?.committer?.date ?? '')
 
-    return { state: Number.isFinite(made) && made > filed + 3600000 ? 'maybe-behind' : 'maybe-same', ...about }
+    // Without a version to compare, the notes say it best: any this copy lacks means it is behind.
+    const news = await notesNotHere()
+
+    return { state: news.groups.length > 0 || (Number.isFinite(made) && made > filed + 3600000) ? 'maybe-behind' : 'maybe-same', ...about, news }
   } catch {
     return { state: 'error', why: 'GitHub could not be reached.' }
   }
@@ -4197,7 +4231,7 @@ const handlers = {
   'docs:read': name => {
     const file =
       name === 'readme' ? path.join(ROOT, 'README.md')
-      : ['quick-start', 'user-guide', 'skins', 'privacy', 'security', 'code-guide'].includes(name) ? path.join(ROOT, 'docs', `${name}.md`)
+      : ['quick-start', 'user-guide', 'whats-new', 'skins', 'privacy', 'security', 'code-guide'].includes(name) ? path.join(ROOT, 'docs', `${name}.md`)
       : null
 
     try {

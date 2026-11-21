@@ -42,6 +42,7 @@ rem which is read whole before any of it runs.
   if errorlevel 1 goto failed
   echo.
   echo  Done. Start Cla-Amp with Cla-Amp.bat.
+  echo  What changed is in docs\whats-new.md, and under "What's new" in the guides.
   echo.
   pause
   exit /b 0
@@ -74,6 +75,7 @@ rem which is read whole before any of it runs.
   if errorlevel 1 goto failed
   echo.
   echo  Done. Start Cla-Amp with Cla-Amp.bat.
+  echo  What changed is in docs\whats-new.md, and under "What's new" in the guides.
   echo.
   pause
   exit /b 0

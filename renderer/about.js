@@ -49,11 +49,13 @@ export const openAbout = async () => {
     void openGuides()
   })
   const said = el('p', 'sheet-note about-update', '')
+  const news = el('div', 'about-news')
   const check = el('button', 'pill', 'Check for updates')
   check.title = 'Asks Cla-Amp’s page on GitHub, now and only now, whether a newer version is out. Nothing is downloaded.'
   check.addEventListener('click', async () => {
     check.disabled = true
     said.textContent = 'Asking GitHub…'
+    news.replaceChildren()
     const got = (await call('update:check').catch(() => null)) ?? { state: 'error', why: 'Not available here.' }
     const newest = got.date ? ` The newest is from ${got.date}${got.what ? `: “${got.what}”` : ''}.` : ''
     const how = ' To update, close Cla-Amp and double-click Update.bat in its folder.'
@@ -69,6 +71,17 @@ export const openAbout = async () => {
               : got.state === 'maybe-same'
                 ? `This copy seems to be the newest version.${newest}`
                 : `Could not check: ${got.why ?? 'something went wrong.'}`
+
+    // What is new, in the words of the "What's new" page, for a copy that is behind.
+    for (const one of got.news?.groups ?? []) {
+      const list = el('ul')
+      list.append(...one.notes.map(note => el('li', '', note)))
+      news.append(el('h3', '', `New on ${one.when}`), list)
+    }
+
+    if ((got.news?.more ?? 0) > 0) {
+      news.append(el('p', 'sheet-note', `…and ${got.news.more} more. The full list is under What’s new in the guides once you have updated.`))
+    }
     check.disabled = false
   })
   const close = el('button', 'pill go', 'Close')
@@ -96,6 +109,7 @@ export const openAbout = async () => {
       'Nothing goes out by itself. A Winamp skin link you paste is fetched from the Winamp Skin Museum, and Check for updates, below, asks GitHub whether a newer Cla-Amp is out: each only when you press it. The Privacy guide has the full list.',
     ),
     said,
+    news,
     foot,
   )
 

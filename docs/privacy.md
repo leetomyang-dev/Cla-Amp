@@ -35,7 +35,7 @@ Cla-Amp sends nothing by itself. These go out, each only when you use it:
 | --- | --- | --- |
 | You chat | Your messages and the files Claude reads, exactly as in Claude Code | Anthropic, through Claude Code, under your own agreement with Anthropic |
 | You press Import from link | A request for the one skin file your link names | The Winamp Skin Museum's file store |
-| You press Check for updates (in About) | A question: what is Cla-Amp's newest version, and, for a copy made with git, how far this copy's version is from it. Nothing about you or your use | GitHub |
+| You press Check for updates (in About) | A question: what is Cla-Amp's newest version, and, for a copy made with git, how far this copy's version is from it; and a request for Cla-Amp's "What's new" page. Nothing about you or your use | GitHub |
 | You run Update.bat | A request for Cla-Amp's newest version, and for the packages it needs | GitHub, and the npm package registry |
 | You click a link in a chat | Your browser opens that page | The page's owner |
 

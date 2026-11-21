@@ -20,6 +20,7 @@ const el = (tag, className = '', text = '') => {
 const GUIDES = [
   ['quick-start', 'Quick start: make it yours'],
   ['user-guide', 'Using Cla-Amp'],
+  ['whats-new', 'What’s new'],
   ['skins', 'Skins and looks'],
   ['privacy', 'Privacy'],
   ['security', 'Security'],
