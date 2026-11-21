@@ -369,6 +369,10 @@ body.no-right #right, body.no-right .splitter[data-side='right'] { display: none
   background: var(--panel); color: var(--text); font: inherit; user-select: text;
 }
 #chatSearch:focus { border-color: var(--accent); }
+#accountFilter {
+  flex: none; height: 26px; margin: 0 0 6px; padding: 0 6px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--text); font: inherit; font-size: 12px; max-width: 100%;
+}
 #chatGroups { display: flex; flex-direction: column; gap: 2px; }
 .group-head {
   display: flex; align-items: center; gap: 7px; padding: 6px 6px 4px; cursor: pointer; color: var(--dim);

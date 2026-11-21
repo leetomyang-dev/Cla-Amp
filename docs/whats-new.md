@@ -4,6 +4,11 @@ What changed in Cla-Amp, newest first, in plain words. To get the newest
 version, close Cla-Amp and double-click **Update.bat** in its folder.
 **Check for updates** in About (the **i** button) says whether one is out.
 
+## 21 November 2026
+
+- **Filter by account.** Above the Projects and Code lists you can show only the chats made with one Claude account. Chats are files on your computer, so they stay on show whoever is signed in; the filter is how you tell them apart. It only hides rows: every chat file is still there, and still readable by anyone using this Windows account.
+- **Sign out and Switch account.** Two buttons in Settings, under Account. Sign out runs Claude Code's own sign-out; Switch account signs out and then opens Claude Code's own sign-in, where you pick the account. Claude Code in your terminal shares that sign-in, so it is signed out too.
+
 ## 20 November 2026
 
 - **Check for updates.** A button in About asks Cla-Amp's page on GitHub whether a newer version is out, and lists what is new. It asks only when you press it and downloads nothing.

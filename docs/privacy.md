@@ -18,6 +18,7 @@ to remove it all.
 | The profile of Cla-Amp's browser (its history, cookies and any sign-in you make there) | `%APPDATA%\Cla-Amp\pages-profile` | Written and read by the browser only. Delete the folder to clear it. |
 | Each day's token and cost totals (numbers only, from Claude Code's own count) | `%APPDATA%\Cla-Amp\claamp.json` | Stay on your computer. |
 | The calendar's due dates, notes and each day's report | `%APPDATA%\Cla-Amp` (the window's own storage) | Stay on your computer. A report goes to Claude only when you put it in a message yourself. |
+| The Claude accounts used on this computer: each one's email and organisation name, and which of them made each saved chat | `%APPDATA%\Cla-Amp\claamp.json` and `chat-owners.json` | For the account filter over Projects and Code, so it can name an account after you sign out of it. Read from Claude Code's own answer about who is signed in and from the organisation id Claude Code writes into each chat's file. Never a password, key or sign-in. Stays on your computer. |
 | Song titles and covers from your music folders | `%APPDATA%\Cla-Amp` | Read from the files you chose. |
 | The browser profile for the docked players and claude.ai when they open in Edge or Brave (in Chrome they use the profile of Cla-Amp's browser, below) | `%APPDATA%\Cla-Amp\player-profile` | Written and read by the browser only. It holds the sign-ins you make in those windows. Cla-Amp never opens it. |
 
@@ -86,6 +87,16 @@ in its settings changes that.
   that sign-in.
 - **YouTube Music, Spotify's web player, claude.ai.** You sign in on the
   service's own page in the browser window. Cla-Amp never sees it.
+- **Signing out does not hide or remove your chats.** They are files on your
+  computer and stay on show for whoever uses this Windows account next,
+  whichever Claude account they sign in with. The account filter narrows the
+  lists; it does not protect anything. To keep chats apart from another
+  person, use separate Windows accounts.
+- **Signing out of Claude.** **Sign out** and **Switch account** in Settings
+  run Claude Code's own sign-out, after asking. Claude Code removes the
+  sign-in it keeps; Cla-Amp never reads or touches it. Claude Code in your
+  terminal uses the same sign-in and is signed out with it.
+
 Cla-Amp itself holds no password, key or token for any service.
 
 ## Removing your data

@@ -15,6 +15,7 @@ import { describeSong, readCover, readPlaylist, scanFolders } from './music-libr
 import { chatsFolder, countOutside, listOutside } from './outside-work.mjs'
 import { readCapped, readCappedLater, readEndLater, readTail, sizeAndBytes } from './safe-read.mjs'
 import { notesNewTo } from './whats-new.mjs'
+import { ownersOnDisk } from './chat-owners.mjs'
 import { convertWinampSkin } from './winamp-skin.mjs'
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url))
@@ -102,6 +103,54 @@ const authStatus = () =>
       }
     })
   })
+
+// For the off-screen tests, which must show no dialog: the answer to the sign-out question.
+const SIGNOUT_ANSWER = IS_DEV ? process.env.CLAAMP_SIGNOUT : undefined
+
+/**
+ * "Sign out", and the first half of "Switch account": after the person says
+ * yes in a system dialog, runs Claude Code's own `auth logout`. Claude Code
+ * removes the sign-in it keeps; this app never sees or touches it. The same
+ * sign-in serves Claude Code in the terminal, and the dialog says so.
+ * Returns { isDone, isSignedIn }.
+ */
+const signOut = async isSwitch => {
+  const working = [...sessions.values()].filter(one => one.isBusy).length
+  const isYes =
+    SIGNOUT_ANSWER !== undefined
+      ? SIGNOUT_ANSWER === 'yes'
+      : (
+          await dialog.showMessageBox(win, {
+            type: 'question',
+            title: 'Cla-Amp',
+            message: isSwitch ? 'Sign out, then sign in with another account?' : 'Sign out of Claude?',
+            detail: `This runs Claude Code's own sign-out. The sign-in is Claude Code's, so Claude Code in your terminal is signed out too. Chats here stop answering until you sign in again; nothing saved is removed.${
+              isSwitch ? "\n\nClaude Code's sign-in then opens, with every kind of account it offers. If you close it without signing in, you stay signed out." : ''
+            }${working > 0 ? `\n\n${working} ${working === 1 ? 'chat is' : 'chats are'} working now and may stop part-way.` : ''}\n\nclaude.ai and the music players are separate sign-ins and are not changed.`,
+            buttons: ['Cancel', isSwitch ? 'Sign out and switch' : 'Sign out'],
+            defaultId: 0,
+            cancelId: 0,
+            noLink: true,
+          })
+        ).response === 1
+
+  if (!isYes) {
+    return { isDone: false, isCancelled: true }
+  }
+
+  await new Promise(resolve => {
+    execFile(CLAUDE_BIN, ['auth', 'logout'], { env: childEnv(), windowsHide: true, timeout: 30000 }, () => resolve())
+  })
+
+  // Idle chats let go of the engine they started while signed in.
+  for (const one of sessions.values()) {
+    one.sleep()
+  }
+
+  const now = await authStatus()
+
+  return { isDone: !now.isSignedIn, ...now }
+}
 
 // Models that cannot show their thinking as they go; learnt from the model list.
 const plainModels = new Set()
@@ -2178,12 +2227,76 @@ const accountInfo = () =>
           organization: text(said.orgName ?? said.organization),
           plan: text(said.subscriptionType),
           method: text(said.authMethod),
+          // Names the account in the chats it made; never a secret.
+          orgId: /^[0-9a-fA-F-]{8,64}$/.test(said.orgId ?? '') ? said.orgId.toLowerCase() : '',
         })
       } catch {
         resolve({ isSignedIn: false })
       }
     })
   })
+
+// What earlier looks found about which account made each chat: { chat id: { size, org } }.
+let ownersKnown = null
+// Raised when chat-owners.mjs learns to look in more places.
+const OWNER_READS = 2
+const ownersFile = () => path.join(dataDir(), 'chat-owners.json')
+
+/**
+ * For the account filter over Projects and Code: the account signed in now,
+ * the accounts seen on this computer (their email and organisation name, kept
+ * so the filter can name them after a sign-out), and which account made each
+ * saved chat. Returns { mine, accounts: [{ id, email, organization }], owners: { chat id: org id or '' } }.
+ */
+const accountsKnown = async () => {
+  const account = await accountInfo()
+
+  if (account.isSignedIn && account.orgId) {
+    state.accounts ??= {}
+    const had = Object.hasOwn(state.accounts, account.orgId) ? state.accounts[account.orgId] : null
+
+    if (had?.email !== account.email || had?.organization !== account.organization) {
+      state.accounts[account.orgId] = { email: account.email, organization: account.organization }
+      saveState()
+    }
+  }
+
+  if (ownersKnown === null) {
+    try {
+      const kept = JSON.parse(readCapped(ownersFile(), 8 << 20)?.toString('utf8') ?? '{}')
+      // Kept with the way of reading that found it: a chat an older, shallower look gave up on is read again.
+      ownersKnown = kept?.reads === OWNER_READS && kept.chats && typeof kept.chats === 'object' ? kept.chats : {}
+    } catch {
+      ownersKnown = {}
+    }
+  }
+
+  const projectsDir = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(app.getPath('home'), '.claude'), 'projects')
+  const { owners, isChanged } = await ownersOnDisk(projectsDir, ownersKnown)
+
+  if (isChanged) {
+    fs.mkdirSync(dataDir(), { recursive: true })
+    fs.writeFile(ownersFile(), JSON.stringify({ reads: OWNER_READS, chats: ownersKnown }), () => {})
+  }
+
+  // An older chat's own file may name no account. For one made in the Claude
+  // desktop app, the folder the app filed its record under says which.
+  const desk = deskChats()
+
+  for (const [id, org] of owners) {
+    if (org === '') {
+      owners.set(id, desk.get(id)?.org ?? '')
+    }
+  }
+
+  return {
+    mine: account.isSignedIn ? account.orgId : '',
+    accounts: Object.entries(state.accounts ?? {})
+      .filter(([id]) => /^[0-9a-f-]{8,64}$/.test(id))
+      .map(([id, one]) => ({ id, email: String(one?.email ?? '').slice(0, 200), organization: String(one?.organization ?? '').slice(0, 200) })),
+    owners: Object.fromEntries(owners),
+  }
+}
 
 /** Claude Code's settings files for the person and for one project: user, project, local. */
 const settingsFiles = project => [
@@ -3114,6 +3227,8 @@ const deskChats = () => {
           const said = JSON.parse(String(readCapped(full, 4000000) ?? ''))
 
           if (typeof said?.sessionId === 'string' && /^[0-9a-f-]{36}$/i.test(String(said.cliSessionId))) {
+            // The desktop app files each record under the account's organisation id.
+            said.inFolder = path.basename(dir)
             records.push(said)
           }
         } catch {
@@ -3151,6 +3266,7 @@ const deskChats = () => {
           branch: String(pr.branch ?? '').slice(0, 120),
         })),
       at: Number(one.lastActivityAt) || 0,
+      org: /^[0-9a-f-]{36}$/i.test(one.inFolder) ? one.inFolder.toLowerCase() : '',
     }
     const ids = [one.cliSessionId, ...(Array.isArray(one.priorCliSessionIds) ? one.priorCliSessionIds : [])]
 
@@ -4327,11 +4443,15 @@ const handlers = {
     return true
   },
   'auth:status': () => authStatus(),
+  'accounts:known': () => guarded(() => accountsKnown()),
   // Opens Claude Code's own sign-in in a console window: it sends the person
   // to their browser, and this app never sees a password or a token.
   'auth:login': async () => {
     return openClaudeConsole(['auth', 'login'], dataDir())
   },
+  // Claude Code's own sign-out, after a question in a system dialog. With
+  // `isSwitch` the window then starts the ordinary sign-in.
+  'auth:logout': isSwitch => signOut(isSwitch === true),
   // A waiting message is sent at once: the work in hand is cut short for it.
   'queue:now': (id, index) => void sessionOf(id)?.sendNow(index),
   'queue:remove': (id, index) => {

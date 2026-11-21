@@ -9,7 +9,7 @@ right.
 
 Download the ZIP from the project's GitHub page (green Code button, Download ZIP), unzip it, and double-click **Cla-Amp.bat**. The first time, it sets itself up; that needs the free program Node.js, which it offers to install if it is missing. After that a double-click starts Cla-Amp at once.
 
-To get a newer version later, close Cla-Amp and double-click **Update.bat** in the same folder. Nothing updates by itself; **Check for updates** in About (the **i** button) asks GitHub whether a newer version is out, and only when you press it. For arranging the window to your taste, see the **Quick start** guide.
+To get a newer version later, close Cla-Amp and double-click **Update.bat** in the same folder. With more than one Claude account on this computer, the list above Projects and Code filters both to the chats one account made. Nothing updates by itself; **Check for updates** in About (the **i** button) asks GitHub whether a newer version is out, and only when you press it. For arranging the window to your taste, see the **Quick start** guide.
 
 ## First steps
 

@@ -2784,6 +2784,88 @@ const tell = (project, news) => {
 }
 window.addEventListener('focus', () => seen(projects.get(activeId)))
 
+// The account filter. Chats are files on this computer and stay on show
+// whoever is signed in, so the lists can be narrowed to the chats one account
+// made: 'all', 'mine' (the account signed in now), an organisation id, or
+// 'none' (chats whose file names no account).
+let accounts = { mine: '', accounts: [], owners: {} }
+let accountFilter = localStorage.getItem('accountFilter') ?? 'all'
+
+/** Whether a saved chat passes the filter. A chat not saved yet, or one this app knows nothing of, always does. */
+const passesAccount = sessionId => {
+  const owner = sessionId ? accounts.owners[sessionId] : undefined
+
+  if (accountFilter === 'all' || owner === undefined) {
+    return true
+  }
+
+  if (accountFilter === 'none') {
+    return owner === ''
+  }
+
+  const wanted = accountFilter === 'mine' ? accounts.mine : accountFilter
+
+  // Signed out, "this account" has nothing to go by: everything stays on show.
+  return wanted === '' || owner === wanted
+}
+
+const renderAccountFilter = () => {
+  const select = $('accountFilter')
+  const counts = new Map()
+
+  for (const owner of Object.values(accounts.owners)) {
+    counts.set(owner, (counts.get(owner) ?? 0) + 1)
+  }
+
+  const named = [...counts.keys()].filter(owner => owner !== '')
+  // With no chat naming an account there is nothing to choose between.
+  select.classList.toggle('hidden', named.length === 0)
+
+  if (named.length === 0) {
+    return
+  }
+
+  const total = Object.keys(accounts.owners).length
+  const nameOf = id => accounts.accounts.find(one => one.id === id)?.email || 'Another account'
+  const choices = [['all', `All accounts (${total})`]]
+
+  if (accounts.mine !== '') {
+    choices.push(['mine', `This account: ${nameOf(accounts.mine)} (${counts.get(accounts.mine) ?? 0})`])
+  }
+
+  for (const id of named.filter(one => one !== accounts.mine)) {
+    choices.push([id, `${nameOf(id)} (${counts.get(id)})`])
+  }
+
+  if (counts.has('')) {
+    choices.push(['none', `No account recorded (${counts.get('')})`])
+  }
+
+  if (!choices.some(([value]) => value === accountFilter)) {
+    accountFilter = 'all'
+  }
+  select.replaceChildren(
+    ...choices.map(([value, label]) => {
+      const option = el('option', '', label)
+      option.value = value
+
+      return option
+    }),
+  )
+  select.value = accountFilter
+}
+
+const loadAccounts = async () => {
+  const got = await call('accounts:known').catch(() => null)
+
+  if (got && !got.error && got.owners) {
+    accounts = got
+  }
+  renderAccountFilter()
+  renderProjects()
+  renderChats()
+}
+
 const renderProjects = () => {
   const list = $('projectList')
   list.replaceChildren()
@@ -2793,6 +2875,11 @@ const renderProjects = () => {
   }
 
   for (const project of projects.values()) {
+    // The project on show stays listed whatever the account filter says.
+    if (project.id !== activeId && !passesAccount(project.chatId ?? project.sessionId)) {
+      continue
+    }
+
     const row = el('div', `proj${project.id === activeId ? ' active' : ''}${project.news ? ` news ${project.news}` : ''}`)
 
     if (project.news) {
@@ -3301,7 +3388,7 @@ const renderChats = () => {
 
   const words = $('chatSearch').value.trim().toLowerCase()
   const shown = allChats.filter(
-    chat => words === '' || chat.title.toLowerCase().includes(words) || chat.cwd.toLowerCase().includes(words),
+    chat => passesAccount(chat.id) && (words === '' || chat.title.toLowerCase().includes(words) || chat.cwd.toLowerCase().includes(words)),
   )
   // Newest first, so the folder worked in last comes first.
   const groups = new Map()
@@ -3507,6 +3594,7 @@ const loadChats = async () => {
   renderChats()
   allChats = (await call('chats:all')) ?? []
   renderChats()
+  void loadAccounts()
 }
 
 // ------------------------------------------------------- status bar and meters
@@ -6522,7 +6610,7 @@ const wire = () => {
       alert(`claude.ai was opened in ${opened.browser}, as an ordinary window.`)
     }
   })
-  $('settingsBtn').addEventListener('click', () => void openSettings(activeId, { look: () => openLook(), guides: () => void openGuides(), about: () => void openAbout() }))
+  $('settingsBtn').addEventListener('click', () => void openSettings(activeId, { look: () => openLook(), guides: () => void openGuides(), about: () => void openAbout(), signIn: () => void signIn(), signedOut: () => void checkSignIn().then(loadAccounts) }))
   $('skin').addEventListener('change', async () => {
     const picked = $('skin').value
     const before = skinHref()
@@ -6645,6 +6733,13 @@ const wire = () => {
     }
   })
   $('chatSearch').addEventListener('input', renderChats)
+  $('accountFilter').addEventListener('change', () => {
+    accountFilter = $('accountFilter').value
+    localStorage.setItem('accountFilter', accountFilter)
+    renderProjects()
+    renderChats()
+  })
+  void loadAccounts()
   const picker = $('picker')
   $('openChat').addEventListener('click', async () => {
     const project = active()

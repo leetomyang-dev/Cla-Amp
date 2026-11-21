@@ -69,6 +69,29 @@ a changed definition is asked about again. `start()` passes every name not in
 `CLAAMP_SERVERS=yes` or `no` (with `CLAAMP_DEV=1`) gives the answer, so no
 dialog shows.
 
+**The account filter.** Claude Code writes the organisation id of the account
+in use into each chat's file. `chat-owners.mjs` reads it back (the start of the
+file, then its end; `tests/chat-owners.test.mjs`), and `accountsKnown()`
+(`accounts:known`) gives the window the account signed in now, the accounts
+seen so far (`state.accounts`: email and organisation name by organisation
+id) and the owner of every saved chat, remembered in `chat-owners.json` so a
+chat is read once. In the window, `passesAccount()` narrows `renderProjects()`
+and `renderChats()` by the choice in `#accountFilter`. It is a convenience
+for telling chats apart, not a wall: the files are untouched. To test it,
+`mk-owner-case`-style: a scratch `CLAUDE_CONFIG_DIR` with chat files naming
+two made-up organisation ids, and a scratch profile whose `accounts` names
+them.
+
+`signOut()` (`auth:logout`, the **Sign out** and **Switch account** buttons
+in Settings) asks in a system dialog, then runs Claude Code's own
+`auth logout`; for a switch the window then starts the ordinary sign-in
+(`auth:login`). Nothing of the sign-in is read, kept or chosen here, and
+there is no list of accounts: that would mean holding sign-ins. To test it
+without signing anyone out, start the test with `CLAUDE_CONFIG_DIR` set to an
+empty scratch folder, `CLAUDECODE` and `CLAUDE_CODE_ENTRYPOINT` unset (or
+`childEnv()` drops the scratch setting), `CLAAMP_SIGNOUT=yes` or `no` as the
+dialog's answer, and check first that `auth:status` says not signed in.
+
 `checkForUpdate()` (`update:check`, the **Check for updates** button in
 About) is the one place the app asks GitHub anything, and only on that
 press: the newest commit on `main`, and for a git copy how far `ownCommit()`

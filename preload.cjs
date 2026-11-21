@@ -67,6 +67,8 @@ const CALLS = new Set([
   'app:restart',
   'auth:status',
   'auth:login',
+  'auth:logout',
+  'accounts:known',
   'sessions:list',
   'sessions:open',
   'chats:all',

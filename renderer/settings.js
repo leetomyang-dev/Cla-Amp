@@ -111,6 +111,50 @@ export const openSettings = async (projectId, hooks = {}) => {
   const data = el('button', 'pill', 'Open Cla-Amp’s data folder')
   data.title = 'Where Cla-Amp keeps its own things: skins, pictures, chats it shows, the player’s browser profile'
   data.addEventListener('click', () => void call('settings:open', 'data', projectId))
+  // Sign out and Switch account only start Claude Code's own commands; the
+  // sign-in itself is always Claude Code's console and Anthropic's page.
+  const signing = el('div', 'sheet-foot')
+  const said = el('p', 'sheet-note', '')
+  const leave = async isSwitch => {
+    const got = await call('auth:logout', isSwitch)
+
+    if (!got || got.isCancelled) {
+      return
+    }
+
+    if (!got.isDone) {
+      said.textContent = 'Claude Code did not sign out. Try again, or run its sign-out in a terminal.'
+
+      return
+    }
+    hooks.signedOut?.()
+
+    if (isSwitch) {
+      dialog.close()
+      hooks.signIn?.()
+    } else {
+      void openSettings(projectId, hooks)
+    }
+  }
+
+  if (account.isSignedIn) {
+    const out = el('button', 'pill', 'Sign out')
+    out.title = 'Runs Claude Code’s own sign-out. Claude Code in your terminal is signed out too.'
+    out.addEventListener('click', () => void leave(false))
+    const other = el('button', 'pill', 'Switch account')
+    other.title = 'Signs out, then opens Claude Code’s own sign-in, where you choose the account and the kind of sign-in'
+    other.addEventListener('click', () => void leave(true))
+    signing.append(out, other)
+  } else if (hooks.signIn) {
+    const sign = el('button', 'pill go', 'Sign in')
+    sign.title = 'Opens Claude Code’s own sign-in. Cla-Amp never sees your password.'
+    sign.addEventListener('click', () => {
+      dialog.close()
+      hooks.signIn()
+    })
+    signing.append(sign)
+  }
+
   const shortcuts = el('div', 'sheet-foot')
 
   for (const [label, run] of [
@@ -140,6 +184,8 @@ export const openSettings = async (projectId, hooks = {}) => {
       'Account',
       fact('Signed in', account.isSignedIn ? 'Yes, through Claude Code' : 'No'),
       ...(account.isSignedIn ? [fact('Email', account.email), fact('Organization', account.organization), fact('Plan', account.plan), fact('Sign-in kind', account.method)] : []),
+      signing,
+      said,
       el('p', 'sheet-note', 'Usage limits are in the Usage limits panel on the right; the model and effort are in the Model panel.'),
     ),
     part(
